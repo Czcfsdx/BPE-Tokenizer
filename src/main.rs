@@ -5,6 +5,7 @@ type TokenID = usize;
 fn main() {
     let mut vocabulary: Vec<(TokenID, TokenID)> = init_vocabulary();
     const MAX_VOCABULARY_LEN: usize = u8::MAX as usize + 10;
+    const VERBOSE: bool = true;
 
     let crops = [
         "Hello, World!",
@@ -15,22 +16,22 @@ fn main() {
     let mut token_seq: Vec<TokenID> = crops[1].bytes().map(|b| b as TokenID).collect();
 
     while vocabulary.len() <= MAX_VOCABULARY_LEN {
-        println!("Old tokens sequence: {:?}", token_seq);
-
         if let Some((token_pair, times)) = find_most_frequent_token_pair(&token_seq) {
             let new_token_id = vocabulary.len();
-            println!(
-                "New Token {} => {:?}: {} times",
-                new_token_id, token_pair, times
-            );
             token_seq = replace_token_pair_to_single_token(token_seq, token_pair, new_token_id);
             vocabulary.push(token_pair);
+            if VERBOSE {
+                println!(
+                    "New Token {} => {:?} had {} occurences",
+                    new_token_id, token_pair, times
+                );
+            }
         } else {
-            println!("most frequent token_pair not found");
+            if VERBOSE {
+                println!("most frequent token_pair not found");
+            }
             break;
         }
-
-        println!("New tokens sequence: {:?}\n", token_seq);
     }
 }
 
@@ -60,10 +61,19 @@ fn find_most_frequent_token_pair(token_seq: &[TokenID]) -> Option<((TokenID, Tok
             .and_modify(|v| *v += 1)
             .or_insert(1);
     }
-    freq_table
+
+    // If no token_pair appears more than once
+    // stop merging token_pair in new token.
+    let (token_pair, times) = freq_table
         .iter()
         .max_by_key(|kv| kv.1)
-        .map(|(token_pair, times)| (*token_pair, *times))
+        .map(|(token_pair, times)| (*token_pair, *times))?;
+
+    if times > 1 {
+        Some((token_pair, times))
+    } else {
+        None
+    }
 }
 
 // Replace every form_token_pair in token_seq to to_token
