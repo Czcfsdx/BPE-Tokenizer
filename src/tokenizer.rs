@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::read_to_string;
 use std::io::Error as IoError;
+use std::string::FromUtf8Error;
 
 #[derive(Debug)]
 pub enum TokenizerError {
     Io(IoError),
+    Decode(FromUtf8Error),
     Param(String),
 }
 
@@ -13,6 +15,7 @@ impl fmt::Display for TokenizerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TokenizerError::Io(err) => write!(f, "IO error: {}", err),
+            TokenizerError::Decode(err) => write!(f, "Decode error: {}", err),
             TokenizerError::Param(msg) => write!(f, "Parameter error: {}", msg),
         }
     }
@@ -24,14 +27,27 @@ impl From<IoError> for TokenizerError {
     }
 }
 
+impl From<FromUtf8Error> for TokenizerError {
+    fn from(err: FromUtf8Error) -> TokenizerError {
+        TokenizerError::Decode(err)
+    }
+}
+
 type TokenID = usize;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
-struct Token(TokenID, TokenID);
+pub struct Token(TokenID, TokenID);
+
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({:>3}, {:>3})", self.0, self.1)
+    }
+}
 
 pub struct Tokenizer {
     // regexp '(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s
-    vocabulary: Vec<Token>,
+    vocabulary: Vec<Token>,              // for decode
+    tokens_map: HashMap<Token, TokenID>, // for encode
 }
 
 impl Tokenizer {
@@ -45,7 +61,10 @@ impl Tokenizer {
         for i in u8::MIN..=u8::MAX {
             vocabulary.push(Token(i as usize, 0));
         }
-        Self { vocabulary }
+        Self {
+            vocabulary,
+            tokens_map: HashMap::new(),
+        }
     }
 
     pub fn train(
@@ -68,40 +87,79 @@ impl Tokenizer {
             .collect();
 
         while self.vocabulary.len() <= max_vocabulary_size {
-            if let Some((token, times)) = Self::find_most_frequent_token_pair(&token_id_seq) {
-                let new_token_id = self.vocabulary.len();
-                token_id_seq = Self::replace_token_to_token_id(token_id_seq, token, new_token_id);
-                self.vocabulary.push(token);
-                if verbose {
-                    let token_bytes =
-                        Self::convert_token_id_to_bytes(&self.vocabulary, new_token_id);
-                    match String::from_utf8(token_bytes) {
-                        Ok(token_string) => println!(
-                            "New token {:>3} ({:>2} times) => ({:>3}, {:>3}): {:<}",
-                            new_token_id,
-                            times,
-                            token.0,
-                            token.1,
-                            format!("({:?})", token_string)
-                        ),
-                        Err(error) => println!(
-                            "New token {:>3} ({:>2} times) => ({:>3}, {:>3}) But error occurs when converting it to String: {}",
-                            new_token_id,
-                            times,
-                            token.0,
-                            token.1,
-                            error
-                        ),
-                    }
-                }
-            } else {
+            let Some((token, times)) = Self::find_most_frequent_token(&token_id_seq) else {
                 if verbose {
                     println!("New token not found");
                 }
                 break;
+            };
+
+            let new_token_id = self.vocabulary.len();
+            token_id_seq = Self::replace_token_to_token_id(token_id_seq, token, new_token_id);
+            self.vocabulary.push(token);
+            self.tokens_map.insert(token, new_token_id);
+            if verbose {
+                let token_bytes = Self::decode_token_id_to_bytes(&self.vocabulary, new_token_id);
+                match String::from_utf8(token_bytes) {
+                        Ok(token_string) => println!(
+                            "New token {:>3} ({:>2} times) => {}: {:<}",
+                            new_token_id,
+                            times,
+                            token,
+                            format!("({:?})", token_string)
+                        ),
+                        // Don't return this error
+                        Err(error) => println!(
+                            "New token {:>3} ({:>2} times) => {} But error occurs when converting it to String: {}",
+                            new_token_id,
+                            times,
+                            token,
+                            error
+                        ),
+                    }
             }
         }
         Ok(())
+    }
+
+    // encode a given string text to a token id sequence
+    pub fn encode(&self, text: &str, verbose: bool) -> Vec<TokenID> {
+        let mut token_id_seq: Vec<TokenID> = text.bytes().map(|b| b as TokenID).collect();
+        let mut tokens_not_in_vocabulary: HashSet<Token> = HashSet::new();
+        while token_id_seq.len() >= 2 {
+            let Some((token, _)) = Self::find_most_frequent_token_with_exclusion(
+                &token_id_seq,
+                &tokens_not_in_vocabulary,
+            ) else {
+                break;
+            };
+
+            let Some(&token_id) = self.tokens_map.get(&token) else {
+                assert!(
+                    !tokens_not_in_vocabulary.contains(&token),
+                    "Token {} appear even be excluded",
+                    token
+                );
+                // exclude the token which are not in the vocabulary
+                tokens_not_in_vocabulary.insert(token);
+                continue;
+            };
+
+            token_id_seq = Self::replace_token_to_token_id(token_id_seq, token, token_id);
+            if verbose {
+                println!("Replace: {} => {:>3}", token, token_id);
+            }
+        }
+        token_id_seq
+    }
+
+    // decode a given token id sequence to a String
+    pub fn decode(&self, token_id_seq: &[TokenID]) -> Result<String, TokenizerError> {
+        Ok(token_id_seq
+            .iter()
+            .map(|t| String::from_utf8(Self::decode_token_id_to_bytes(&self.vocabulary, *t)))
+            .collect::<Result<Vec<String>, std::string::FromUtf8Error>>()?
+            .concat())
     }
 }
 
@@ -116,11 +174,40 @@ impl Tokenizer {
     // WARN: Because HashMap does not maintain any order of the key-value pairs,
     // if there are multiple token_pairs that occur the most frequently,
     // we can't assure that the same token will be selected each time.
-    fn find_most_frequent_token_pair(token_id_seq: &[TokenID]) -> Option<(Token, usize)> {
+    fn find_most_frequent_token(token_id_seq: &[TokenID]) -> Option<(Token, usize)> {
         let mut freq_table: HashMap<Token, usize> = HashMap::new();
         for w in token_id_seq.windows(2) {
             let token = Token(w[0], w[1]);
             freq_table.entry(token).and_modify(|v| *v += 1).or_insert(1);
+        }
+
+        // If no token appears more than once
+        // stop merging token in new token.
+        let (token, times) = freq_table
+            .iter()
+            .max_by_key(|kv| kv.1)
+            .map(|(token, times)| (*token, *times))?;
+
+        if times > 1 {
+            Some((token, times))
+        } else {
+            None
+        }
+    }
+
+    // Find the token pair that appears most frequently in the given token_id_seq
+    // and also not in the exclude_set
+    // WARN: the same as `find_most_frequent_token`
+    fn find_most_frequent_token_with_exclusion(
+        token_id_seq: &[TokenID],
+        exclude_set: &HashSet<Token>,
+    ) -> Option<(Token, usize)> {
+        let mut freq_table: HashMap<Token, usize> = HashMap::new();
+        for w in token_id_seq.windows(2) {
+            let token = Token(w[0], w[1]);
+            if !exclude_set.contains(&token) {
+                freq_table.entry(token).and_modify(|v| *v += 1).or_insert(1);
+            }
         }
 
         // If no token appears more than once
@@ -160,8 +247,8 @@ impl Tokenizer {
         new_token_id_seq
     }
 
-    // convert a token to a byte sequence
-    fn convert_token_id_to_bytes(vocabulary: &[Token], token_id: usize) -> Vec<u8> {
+    // decode a token to a byte sequence
+    fn decode_token_id_to_bytes(vocabulary: &[Token], token_id: TokenID) -> Vec<u8> {
         let mut bytes: Vec<u8> = vec![];
         let Token(left, right) = vocabulary[token_id];
         if token_id == left {
@@ -172,8 +259,8 @@ impl Tokenizer {
             );
             bytes.push(token_id as u8);
         } else {
-            let mut left_bytes = Self::convert_token_id_to_bytes(vocabulary, left);
-            let mut right_bytes = Self::convert_token_id_to_bytes(vocabulary, right);
+            let mut left_bytes = Self::decode_token_id_to_bytes(vocabulary, left);
+            let mut right_bytes = Self::decode_token_id_to_bytes(vocabulary, right);
             bytes.append(&mut left_bytes);
             bytes.append(&mut right_bytes);
         }
