@@ -1,19 +1,23 @@
-use std::collections::HashMap;
+use {std::collections::HashMap, std::fs::read_to_string, std::process::exit};
 
 type TokenID = usize;
 
 fn main() {
     let mut vocabulary: Vec<(TokenID, TokenID)> = init_vocabulary();
-    const MAX_VOCABULARY_LEN: usize = u8::MAX as usize + 10;
+    const MAX_VOCABULARY_LEN: usize = u8::MAX as usize + 1000;
     const VERBOSE: bool = true;
+    const TRAIN_CROPS_PATH: &str = "datasets/bpe-wiki.txt";
 
-    let crops = [
-        "Hello, World!",
-        "The quick brown fox jumps over the lazy dog",
-        // From https://en.wikipedia.org/wiki/Byte-pair_encoding
-        "The original version of the algorithm focused on compression. It replaces the highest-frequency pair of bytes with a new byte that was not contained in the initial dataset. A lookup freq_table of the replacements is required to rebuild the initial dataset. The modified version builds tokens (units of recognition) that match varying amounts of source text, from single characters (including single digits or single punctuation marks) to whole words (even long compound words)."
-    ];
-    let mut token_seq: Vec<TokenID> = crops[1].bytes().map(|b| b as TokenID).collect();
+    let mut token_seq: Vec<TokenID> = vec![];
+    match read_to_string(TRAIN_CROPS_PATH) {
+        Ok(crops) => {
+            token_seq = crops.bytes().map(|b| b as TokenID).collect();
+        }
+        Err(error) => {
+            println!("Error: {}", error);
+            exit(69);
+        }
+    }
 
     while vocabulary.len() <= MAX_VOCABULARY_LEN {
         if let Some((token_pair, times)) = find_most_frequent_token_pair(&token_seq) {
@@ -21,14 +25,21 @@ fn main() {
             token_seq = replace_token_pair_to_single_token(token_seq, token_pair, new_token_id);
             vocabulary.push(token_pair);
             if VERBOSE {
-                println!(
-                    "New Token {} => {:?} had {} occurences",
-                    new_token_id, token_pair, times
-                );
+                let token_bytes = convert_token_to_bytes(&vocabulary, new_token_id);
+                match String::from_utf8(token_bytes) {
+                    Ok(token_string) => println!(
+                        "New token {:>3} => ({:>3}, {:>3}): {:<25} had {:>2} occurrences",
+                        new_token_id, token_pair.0, token_pair.1, format!("(\"{}\")", token_string), times
+                    ),
+                    Err(error) => println!(
+                        "New token {:>3} => ({:>3}, {:>3}) had {:>2} occurrences. But error occurs when converting it to String: {}",
+                        new_token_id, token_pair.0, token_pair.1, times, error
+                    ),
+                }
             }
         } else {
             if VERBOSE {
-                println!("most frequent token_pair not found");
+                println!("New token not found");
             }
             break;
         }
@@ -41,7 +52,7 @@ fn main() {
 // ...
 // 255 => { left: 255, right: 0}
 fn init_vocabulary() -> Vec<(TokenID, TokenID)> {
-    let mut vocabulary = vec![];
+    let mut vocabulary = Vec::with_capacity(u8::MAX as usize + 1);
     for i in u8::MIN..=u8::MAX {
         vocabulary.push((i as usize, 0));
     }
@@ -95,4 +106,24 @@ fn replace_token_pair_to_single_token(
     }
     new_token_seq.shrink_to_fit();
     new_token_seq
+}
+
+// convert a token to a byte sequence
+fn convert_token_to_bytes(vocabulary: &[(TokenID, TokenID)], token_id: usize) -> Vec<u8> {
+    let mut bytes: Vec<u8> = vec![];
+    let (left, right) = vocabulary[token_id];
+    if token_id == left {
+        debug_assert!(
+            token_id >= u8::MIN as usize && token_id <= u8::MAX as usize,
+            "token_id should in [0, 255], now is {}",
+            token_id
+        );
+        bytes.push(token_id as u8);
+    } else {
+        let mut left_bytes = convert_token_to_bytes(vocabulary, left);
+        let mut right_bytes = convert_token_to_bytes(vocabulary, right);
+        bytes.append(&mut left_bytes);
+        bytes.append(&mut right_bytes);
+    }
+    bytes
 }
