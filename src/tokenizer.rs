@@ -78,11 +78,11 @@ impl Tokenizer {
                 let token_bytes = Self::decode_token_id_to_bytes(&self.vocabulary, new_token_id);
                 match String::from_utf8(token_bytes) {
                         Ok(token_string) => println!(
-                            "New token {:>3} ({:>2} times) => {}: {:<}",
+                            "New token {:>3} ({:>2} times) => {}: ({:?})",
                             new_token_id,
                             times,
                             token,
-                            format!("({:?})", token_string)
+                            token_string
                         ),
                     // Don't return this error, handle the error on-site.
                         Err(error) => println!(
@@ -166,6 +166,30 @@ impl Tokenizer {
             vocabulary: data.vocabulary,
             tokens_map: data.tokens_map_vec.into_iter().collect(),
         })
+    }
+
+    // render the vocabulary as a String.
+    pub fn vocabulary_to_text(&self) -> String {
+        let mut output = String::new();
+        for (token_id, token) in self.vocabulary.iter().enumerate() {
+            if token_id <= u8::MAX as TokenID {
+                continue;
+            }
+            let temp =
+                match String::from_utf8(Self::decode_token_id_to_bytes(&self.vocabulary, token_id))
+                {
+                    Ok(token_string) => {
+                        format!("Token {:>3} => {}: ({:?})\n", token_id, token, token_string)
+                    }
+                    // Don't return this error, handle the error on-site.
+                    Err(error) => format!(
+                        "Token {:>3} => {} But error occurs when converting it to String: {}\n",
+                        token_id, token, error
+                    ),
+                };
+            output.push_str(&temp);
+        }
+        output
     }
 }
 
