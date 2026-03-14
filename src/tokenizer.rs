@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
+use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::read_to_string;
 
 type TokenID = usize;
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, Archive, Deserialize, Serialize)]
 pub struct Token(TokenID, TokenID);
 
 impl fmt::Display for Token {
@@ -14,10 +15,19 @@ impl fmt::Display for Token {
     }
 }
 
+#[derive(PartialEq, Eq, Debug)]
 pub struct Tokenizer {
     // regexp '(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s
     vocabulary: Vec<Token>,              // for decode
     tokens_map: HashMap<Token, TokenID>, // for encode
+}
+
+// for `save` and `lode`
+#[derive(Archive, Deserialize, Serialize)]
+struct TokenizerData {
+    pub vocabulary: Vec<Token>,
+    // Store as a Vec for a more compact and faster loading experience.
+    pub tokens_map_vec: Vec<(Token, TokenID)>,
 }
 
 impl Tokenizer {
@@ -127,6 +137,35 @@ impl Tokenizer {
             .collect::<Result<Vec<String>, std::string::FromUtf8Error>>()
             .with_context(|| "Fail to decode the given token id sequence")?
             .concat())
+    }
+
+    // dump the tokenizer (`vocabulary` and `tokens_map`) into a file in the given path.
+    pub fn save(&self, path: &str) -> Result<()> {
+        let data = TokenizerData {
+            vocabulary: self.vocabulary.clone(),
+            tokens_map_vec: self.tokens_map.iter().map(|(k, v)| (*k, *v)).collect(),
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data)
+            .with_context(|| "Fail to serialize the tokenizer model")?;
+        std::fs::write(path, &bytes).with_context(|| {
+            format!(
+                "Fail to write the binary serialization of the tokenizer model to the file: {}",
+                path,
+            )
+        })?;
+        Ok(())
+    }
+
+    // load the tokenizer (`vocabulary` and `tokens_map`) form a file in the given path.
+    pub fn load(path: &str) -> Result<Self> {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("Fail to read from the file: {}", path))?;
+        let data = rkyv::from_bytes::<TokenizerData, rkyv::rancor::Error>(&bytes)
+            .with_context(|| format!("Fail to deserialize the data from the file: {}", path))?;
+        Ok(Self {
+            vocabulary: data.vocabulary,
+            tokens_map: data.tokens_map_vec.into_iter().collect(),
+        })
     }
 }
 
