@@ -1,37 +1,7 @@
+use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::read_to_string;
-use std::io::Error as IoError;
-use std::string::FromUtf8Error;
-
-#[derive(Debug)]
-pub enum TokenizerError {
-    Io(IoError),
-    Decode(FromUtf8Error),
-    Param(String),
-}
-
-impl fmt::Display for TokenizerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TokenizerError::Io(err) => write!(f, "IO error: {}", err),
-            TokenizerError::Decode(err) => write!(f, "Decode error: {}", err),
-            TokenizerError::Param(msg) => write!(f, "Parameter error: {}", msg),
-        }
-    }
-}
-
-impl From<IoError> for TokenizerError {
-    fn from(err: IoError) -> TokenizerError {
-        TokenizerError::Io(err)
-    }
-}
-
-impl From<FromUtf8Error> for TokenizerError {
-    fn from(err: FromUtf8Error) -> TokenizerError {
-        TokenizerError::Decode(err)
-    }
-}
 
 type TokenID = usize;
 
@@ -67,21 +37,17 @@ impl Tokenizer {
         }
     }
 
-    pub fn train(
-        &mut self,
-        max_vocabulary_size: usize,
-        path: &str,
-        verbose: bool,
-    ) -> Result<(), TokenizerError> {
+    pub fn train(&mut self, max_vocabulary_size: usize, path: &str, verbose: bool) -> Result<()> {
         if max_vocabulary_size < u8::MAX as usize {
-            return Err(TokenizerError::Param(format!(
+            anyhow::bail!(
                 "max_vocabulary_size must be greater than {}, now is {}",
                 u8::MAX as usize,
                 max_vocabulary_size
-            )));
+            );
         }
 
-        let mut token_id_seq: Vec<TokenID> = read_to_string(path)?
+        let mut token_id_seq: Vec<TokenID> = read_to_string(path)
+            .with_context(|| format!("Failed to read from the file: {}", path))?
             .bytes()
             .map(|b| b as TokenID)
             .collect();
@@ -108,7 +74,7 @@ impl Tokenizer {
                             token,
                             format!("({:?})", token_string)
                         ),
-                        // Don't return this error
+                    // Don't return this error, handle the error on-site.
                         Err(error) => println!(
                             "New token {:>3} ({:>2} times) => {} But error occurs when converting it to String: {}",
                             new_token_id,
@@ -154,11 +120,12 @@ impl Tokenizer {
     }
 
     // decode a given token id sequence to a String
-    pub fn decode(&self, token_id_seq: &[TokenID]) -> Result<String, TokenizerError> {
+    pub fn decode(&self, token_id_seq: &[TokenID]) -> Result<String> {
         Ok(token_id_seq
             .iter()
             .map(|t| String::from_utf8(Self::decode_token_id_to_bytes(&self.vocabulary, *t)))
-            .collect::<Result<Vec<String>, std::string::FromUtf8Error>>()?
+            .collect::<Result<Vec<String>, std::string::FromUtf8Error>>()
+            .with_context(|| "Fail to decode the given token id sequence")?
             .concat())
     }
 }
