@@ -74,12 +74,21 @@ impl Tokenizer {
             .collect();
 
         while self.vocabulary.len() <= max_vocabulary_size {
-            let Some((token, times)) = Self::find_most_frequent_token(&crops_token_id_seq) else {
+            let Some((token, times)) = Self::find_most_frequent_token(&crops_token_id_seq, None)
+            else {
                 if verbose {
                     println!("New token not found");
                 }
                 break;
             };
+
+            // If no token appears more than once, stop merging token in new token.
+            if times <= 1 {
+                if verbose {
+                    println!("New token not found");
+                }
+                break;
+            }
 
             let new_token_id = self.vocabulary.len();
             crops_token_id_seq = crops_token_id_seq
@@ -129,9 +138,9 @@ impl Tokenizer {
         let mut tokens_not_in_vocabulary: HashSet<Token> = HashSet::new();
 
         loop {
-            let Some((token, _)) = Self::find_most_frequent_token_with_exclusion(
+            let Some((token, _)) = Self::find_most_frequent_token(
                 &chunks_token_id_seq,
-                &tokens_not_in_vocabulary,
+                Some(&tokens_not_in_vocabulary),
             ) else {
                 break;
             };
@@ -231,61 +240,28 @@ impl Default for Tokenizer {
 
 impl Tokenizer {
     // Find the token pair that appears most frequently in the given texts_token_id_seq
+    // If the exclude_set is not None, it will also filter all tokens in the exclude_set
     // WARN: Because HashMap does not maintain any order of the key-value pairs,
     // if there are multiple token_pairs that occur the most frequently,
     // we can't assure that the same token will be selected each time.
-    fn find_most_frequent_token(texts_token_id_seq: &[Vec<TokenID>]) -> Option<(Token, usize)> {
-        let mut freq_table: HashMap<Token, usize> = HashMap::new();
-        for text in texts_token_id_seq {
-            for w in text.windows(2) {
-                let token = Token(w[0], w[1]);
-                freq_table.entry(token).and_modify(|v| *v += 1).or_insert(1);
-            }
-        }
-
-        // If no token appears more than once
-        // stop merging token in new token.
-        let (token, times) = freq_table
-            .iter()
-            .max_by_key(|kv| kv.1)
-            .map(|(token, times)| (*token, *times))?;
-
-        if times > 1 {
-            Some((token, times))
-        } else {
-            None
-        }
-    }
-
-    // Find the token pair that appears most frequently in the given texts_token_id_seq
-    // and also not in the exclude_set
-    // WARN: the same as `find_most_frequent_token`
-    fn find_most_frequent_token_with_exclusion(
+    fn find_most_frequent_token(
         texts_token_id_seq: &[Vec<TokenID>],
-        exclude_set: &HashSet<Token>,
+        exclude_set: Option<&HashSet<Token>>,
     ) -> Option<(Token, usize)> {
         let mut freq_table: HashMap<Token, usize> = HashMap::new();
         for text in texts_token_id_seq {
             for w in text.windows(2) {
                 let token = Token(w[0], w[1]);
-                if !exclude_set.contains(&token) {
+                if exclude_set.is_none_or(|set| !set.contains(&token)) {
                     freq_table.entry(token).and_modify(|v| *v += 1).or_insert(1);
                 }
             }
         }
 
-        // If no token appears more than once
-        // stop merging token in new token.
-        let (token, times) = freq_table
+        freq_table
             .iter()
             .max_by_key(|kv| kv.1)
-            .map(|(token, times)| (*token, *times))?;
-
-        if times > 1 {
-            Some((token, times))
-        } else {
-            None
-        }
+            .map(|(token, times)| (*token, *times))
     }
 
     // Replace every form_token in token_id_seq to to_token_id
