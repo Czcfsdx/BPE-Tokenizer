@@ -5,6 +5,9 @@ use std::fmt;
 use std::fs::read_to_string;
 
 type TokenID = usize;
+// Pattern from: https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
+const PATTERN_STR: &str =
+    r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, Archive, Deserialize, Serialize)]
 pub struct Token(TokenID, TokenID);
@@ -17,7 +20,6 @@ impl fmt::Display for Token {
 
 #[derive(PartialEq, Eq, Debug)]
 pub struct Tokenizer {
-    // regexp '(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s
     vocabulary: Vec<Token>,              // for decode
     tokens_map: HashMap<Token, TokenID>, // for encode
 }
@@ -56,14 +58,23 @@ impl Tokenizer {
             );
         }
 
-        let mut token_id_seq: Vec<TokenID> = read_to_string(path)
-            .with_context(|| format!("Failed to read from the file: {}", path))?
-            .bytes()
-            .map(|b| b as TokenID)
+        // Pre-tokenize
+        let pattern = fancy_regex::Regex::new(PATTERN_STR)?;
+        let file_content = read_to_string(path)
+            .with_context(|| format!("Failed to read from the file: {}", path))?;
+        let crops: Vec<&str> = pattern
+            .find_iter(&file_content)
+            .filter_map(|m| m.ok())
+            .map(|m| m.as_str())
+            .collect();
+
+        let mut crops_token_id_seq: Vec<Vec<TokenID>> = crops
+            .iter()
+            .map(|s| s.bytes().map(|b| b as TokenID).collect::<Vec<TokenID>>())
             .collect();
 
         while self.vocabulary.len() <= max_vocabulary_size {
-            let Some((token, times)) = Self::find_most_frequent_token(&token_id_seq) else {
+            let Some((token, times)) = Self::find_most_frequent_token(&crops_token_id_seq) else {
                 if verbose {
                     println!("New token not found");
                 }
@@ -71,7 +82,10 @@ impl Tokenizer {
             };
 
             let new_token_id = self.vocabulary.len();
-            token_id_seq = Self::replace_token_to_token_id(token_id_seq, token, new_token_id);
+            crops_token_id_seq = crops_token_id_seq
+                .into_iter()
+                .map(|v| Self::replace_token_to_token_id(v, token, new_token_id))
+                .collect();
             self.vocabulary.push(token);
             self.tokens_map.insert(token, new_token_id);
             if verbose {
@@ -99,12 +113,24 @@ impl Tokenizer {
     }
 
     // encode a given string text to a token id sequence
-    pub fn encode(&self, text: &str, verbose: bool) -> Vec<TokenID> {
-        let mut token_id_seq: Vec<TokenID> = text.bytes().map(|b| b as TokenID).collect();
+    pub fn encode(&self, text: &str, verbose: bool) -> Result<Vec<TokenID>> {
+        // Pre-tokenize
+        let pattern = fancy_regex::Regex::new(PATTERN_STR)?;
+        let chunks: Vec<&str> = pattern
+            .find_iter(text)
+            .filter_map(|m| m.ok())
+            .map(|m| m.as_str())
+            .collect();
+
+        let mut chunks_token_id_seq: Vec<Vec<TokenID>> = chunks
+            .iter()
+            .map(|s| s.bytes().map(|b| b as TokenID).collect::<Vec<TokenID>>())
+            .collect();
         let mut tokens_not_in_vocabulary: HashSet<Token> = HashSet::new();
-        while token_id_seq.len() >= 2 {
+
+        loop {
             let Some((token, _)) = Self::find_most_frequent_token_with_exclusion(
-                &token_id_seq,
+                &chunks_token_id_seq,
                 &tokens_not_in_vocabulary,
             ) else {
                 break;
@@ -121,12 +147,16 @@ impl Tokenizer {
                 continue;
             };
 
-            token_id_seq = Self::replace_token_to_token_id(token_id_seq, token, token_id);
+            chunks_token_id_seq = chunks_token_id_seq
+                .into_iter()
+                .map(|v| Self::replace_token_to_token_id(v, token, token_id))
+                .collect();
             if verbose {
-                println!("Replace: {} => {:>3}", token, token_id);
+                println!("Replace {} => {:>3}", token, token_id);
             }
         }
-        token_id_seq
+
+        Ok(chunks_token_id_seq.concat())
     }
 
     // decode a given token id sequence to a String
@@ -200,15 +230,17 @@ impl Default for Tokenizer {
 }
 
 impl Tokenizer {
-    // Find the token pair that appears most frequently in the given token_id_seq
+    // Find the token pair that appears most frequently in the given texts_token_id_seq
     // WARN: Because HashMap does not maintain any order of the key-value pairs,
     // if there are multiple token_pairs that occur the most frequently,
     // we can't assure that the same token will be selected each time.
-    fn find_most_frequent_token(token_id_seq: &[TokenID]) -> Option<(Token, usize)> {
+    fn find_most_frequent_token(texts_token_id_seq: &[Vec<TokenID>]) -> Option<(Token, usize)> {
         let mut freq_table: HashMap<Token, usize> = HashMap::new();
-        for w in token_id_seq.windows(2) {
-            let token = Token(w[0], w[1]);
-            freq_table.entry(token).and_modify(|v| *v += 1).or_insert(1);
+        for text in texts_token_id_seq {
+            for w in text.windows(2) {
+                let token = Token(w[0], w[1]);
+                freq_table.entry(token).and_modify(|v| *v += 1).or_insert(1);
+            }
         }
 
         // If no token appears more than once
@@ -225,18 +257,20 @@ impl Tokenizer {
         }
     }
 
-    // Find the token pair that appears most frequently in the given token_id_seq
+    // Find the token pair that appears most frequently in the given texts_token_id_seq
     // and also not in the exclude_set
     // WARN: the same as `find_most_frequent_token`
     fn find_most_frequent_token_with_exclusion(
-        token_id_seq: &[TokenID],
+        texts_token_id_seq: &[Vec<TokenID>],
         exclude_set: &HashSet<Token>,
     ) -> Option<(Token, usize)> {
         let mut freq_table: HashMap<Token, usize> = HashMap::new();
-        for w in token_id_seq.windows(2) {
-            let token = Token(w[0], w[1]);
-            if !exclude_set.contains(&token) {
-                freq_table.entry(token).and_modify(|v| *v += 1).or_insert(1);
+        for text in texts_token_id_seq {
+            for w in text.windows(2) {
+                let token = Token(w[0], w[1]);
+                if !exclude_set.contains(&token) {
+                    freq_table.entry(token).and_modify(|v| *v += 1).or_insert(1);
+                }
             }
         }
 
@@ -278,6 +312,7 @@ impl Tokenizer {
     }
 
     // decode a token to a byte sequence
+    // PERF: Implement some kind of cache to not decode the same token over and over again.
     fn decode_token_id_to_bytes(vocabulary: &[Token], token_id: TokenID) -> Vec<u8> {
         let mut bytes: Vec<u8> = vec![];
         let Token(left, right) = vocabulary[token_id];
