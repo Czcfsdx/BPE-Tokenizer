@@ -32,6 +32,7 @@ struct TokenizerData {
     pub tokens_map_vec: Vec<(Token, TokenID)>,
 }
 
+// Public Method
 impl Tokenizer {
     // Init the vocabulary to:
     // 0 => { left: 0, right: 0}
@@ -98,7 +99,7 @@ impl Tokenizer {
             self.vocabulary.push(token);
             self.tokens_map.insert(token, new_token_id);
             if verbose {
-                let token_bytes = Self::decode_token_id_to_bytes(&self.vocabulary, new_token_id);
+                let token_bytes = self.decode_token_id_to_bytes(new_token_id);
                 match String::from_utf8(token_bytes) {
                         Ok(token_string) => println!(
                             "New token {:>3} ({:>2} times) => {}: ({:?})",
@@ -122,7 +123,7 @@ impl Tokenizer {
     }
 
     // encode a given string text to a token id sequence
-    pub fn encode(&self, text: &str, verbose: bool) -> Result<Vec<TokenID>> {
+    pub fn encode(&self, text: &str) -> Result<Vec<TokenID>> {
         // Pre-tokenize
         let pattern = fancy_regex::Regex::new(PATTERN_STR)?;
         let chunks: Vec<&str> = pattern
@@ -131,41 +132,10 @@ impl Tokenizer {
             .map(|m| m.as_str())
             .collect();
 
-        let mut chunks_token_id_seq: Vec<Vec<TokenID>> = chunks
+        Ok(chunks
             .iter()
-            .map(|s| s.bytes().map(|b| b as TokenID).collect::<Vec<TokenID>>())
-            .collect();
-        let mut tokens_not_in_vocabulary: HashSet<Token> = HashSet::new();
-
-        loop {
-            let Some((token, _)) = Self::find_most_frequent_token(
-                &chunks_token_id_seq,
-                Some(&tokens_not_in_vocabulary),
-            ) else {
-                break;
-            };
-
-            let Some(&token_id) = self.tokens_map.get(&token) else {
-                assert!(
-                    !tokens_not_in_vocabulary.contains(&token),
-                    "Token {} appear even be excluded",
-                    token
-                );
-                // exclude the token which are not in the vocabulary
-                tokens_not_in_vocabulary.insert(token);
-                continue;
-            };
-
-            chunks_token_id_seq = chunks_token_id_seq
-                .into_iter()
-                .map(|v| Self::replace_token_to_token_id(v, token, token_id))
-                .collect();
-            if verbose {
-                println!("Replace {} => {:>3}", token, token_id);
-            }
-        }
-
-        Ok(chunks_token_id_seq.concat())
+            .flat_map(|&chunk| self.encode_chunk(chunk))
+            .collect())
     }
 
     // decode a given token id sequence to a String
@@ -173,7 +143,7 @@ impl Tokenizer {
         String::from_utf8(
             token_id_seq
                 .iter()
-                .flat_map(|t| Self::decode_token_id_to_bytes(&self.vocabulary, *t))
+                .flat_map(|&t| self.decode_token_id_to_bytes(t))
                 .collect::<Vec<u8>>(),
         )
         .with_context(|| "Fail to decode the given token id sequence")
@@ -215,18 +185,16 @@ impl Tokenizer {
             if token_id <= u8::MAX as TokenID {
                 continue;
             }
-            let temp =
-                match String::from_utf8(Self::decode_token_id_to_bytes(&self.vocabulary, token_id))
-                {
-                    Ok(token_string) => {
-                        format!("Token {:>3} => {}: ({:?})\n", token_id, token, token_string)
-                    }
-                    // Don't return this error, handle the error on-site.
-                    Err(error) => format!(
-                        "Token {:>3} => {} But error occurs when converting it to String: {}\n",
-                        token_id, token, error
-                    ),
-                };
+            let temp = match String::from_utf8(self.decode_token_id_to_bytes(token_id)) {
+                Ok(token_string) => {
+                    format!("Token {:>3} => {}: ({:?})\n", token_id, token, token_string)
+                }
+                // Don't return this error, handle the error on-site.
+                Err(error) => format!(
+                    "Token {:>3} => {} But error occurs when converting it to String: {}\n",
+                    token_id, token, error
+                ),
+            };
             output.push_str(&temp);
         }
         output
@@ -239,6 +207,56 @@ impl Default for Tokenizer {
     }
 }
 
+// Private Method
+impl Tokenizer {
+    // encode a string chunk to a token id sequence
+    fn encode_chunk(&self, chunk: &str) -> Vec<TokenID> {
+        let mut token_id_seq: Vec<TokenID> = chunk.bytes().map(|c| c as TokenID).collect();
+
+        if token_id_seq.len() < 2 {
+            return token_id_seq;
+        }
+
+        let mut i: usize = 0;
+        while i < token_id_seq.len().saturating_sub(1) {
+            let token = Token(token_id_seq[i], token_id_seq[i + 1]);
+            if let Some(&token_id) = self.tokens_map.get(&token) {
+                token_id_seq[i] = token_id;
+                token_id_seq.remove(i + 1);
+                if i > 0 {
+                    i = i.saturating_sub(1);
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        token_id_seq
+    }
+
+    // decode a token to a byte sequence
+    // PERF: Implement some kind of cache to not decode the same token over and over again.
+    fn decode_token_id_to_bytes(&self, token_id: TokenID) -> Vec<u8> {
+        let mut bytes: Vec<u8> = vec![];
+        let Token(left, right) = self.vocabulary[token_id];
+        if token_id == left {
+            debug_assert!(
+                token_id >= u8::MIN as usize && token_id <= u8::MAX as usize,
+                "token_id should in [0, 255], now is {}",
+                token_id
+            );
+            bytes.push(token_id as u8);
+        } else {
+            let mut left_bytes = self.decode_token_id_to_bytes(left);
+            let mut right_bytes = self.decode_token_id_to_bytes(right);
+            bytes.append(&mut left_bytes);
+            bytes.append(&mut right_bytes);
+        }
+        bytes
+    }
+}
+
+// Associated Function
 impl Tokenizer {
     // Find the token pair that appears most frequently in the given texts_token_id_seq
     // If the exclude_set is not None, it will also filter all tokens in the exclude_set
@@ -286,26 +304,5 @@ impl Tokenizer {
         }
         new_token_id_seq.shrink_to_fit();
         new_token_id_seq
-    }
-
-    // decode a token to a byte sequence
-    // PERF: Implement some kind of cache to not decode the same token over and over again.
-    fn decode_token_id_to_bytes(vocabulary: &[Token], token_id: TokenID) -> Vec<u8> {
-        let mut bytes: Vec<u8> = vec![];
-        let Token(left, right) = vocabulary[token_id];
-        if token_id == left {
-            debug_assert!(
-                token_id >= u8::MIN as usize && token_id <= u8::MAX as usize,
-                "token_id should in [0, 255], now is {}",
-                token_id
-            );
-            bytes.push(token_id as u8);
-        } else {
-            let mut left_bytes = Self::decode_token_id_to_bytes(vocabulary, left);
-            let mut right_bytes = Self::decode_token_id_to_bytes(vocabulary, right);
-            bytes.append(&mut left_bytes);
-            bytes.append(&mut right_bytes);
-        }
-        bytes
     }
 }

@@ -20,7 +20,7 @@ fn main() {
     // Test the encode and the decode
     const TEXT: &str = "Byte-pair encoding (BPE) is a text compression algorithm from 1994 that iteratively replaces frequent byte pairs with placeholder symbols. Modern large language models use a modified version that converts text into \"tokens\" (natural numbers) by merging frequent character sequences, creating a fixed-size vocabulary. Unlike the original compression-focused approach, this tokenization method ensures any UTF-8 text can be encoded, handling unknown characters through byte-level processing or special tokens.";
     let tokens = model
-        .encode(TEXT, true)
+        .encode(TEXT)
         .unwrap_or_else(|e| eprintln_error(e));
     println!("Encode result: {:?}\n", tokens);
     let decoded_text = model.decode(&tokens).unwrap_or_else(|e| eprintln_error(e));
@@ -29,6 +29,6 @@ fn main() {
 }
 
 fn eprintln_error(error: anyhow::Error) -> ! {
-    eprintln!("{}", error);
+    eprintln!("{:?}", error);
     std::process::exit(69);
 }
