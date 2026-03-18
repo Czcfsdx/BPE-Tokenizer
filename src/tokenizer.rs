@@ -107,30 +107,75 @@ impl Tokenizer {
     }
 
     // encode a given string text to a token sequence
-    pub fn encode(&self, text: &str) -> Result<Vec<Token>> {
-        // Pre-tokenize
-        let pattern = fancy_regex::Regex::new(PATTERN_STR)?;
-        let chunks: Vec<&str> = pattern
-            .find_iter(text)
-            .filter_map(|m| m.ok())
-            .map(|m| m.as_str())
-            .collect();
+    // if the special_tokens is not None, encode the special
+    // str to the special tokens
+    pub fn encode(
+        &self,
+        text: &str,
+        special_tokens: Option<HashMap<&str, Token>>,
+    ) -> Result<Vec<Token>> {
+        if let Some(special_tokens) = special_tokens {
+            // special tokens match
+            let special_pattern_str = special_tokens
+                .keys()
+                .map(|&s| fancy_regex::escape(s).into_owned())
+                .collect::<Vec<String>>()
+                .join("|");
+            let special_pattern = fancy_regex::Regex::new(&special_pattern_str)
+                .with_context(|| "Fail to turn special_tokens into regex expression")?;
 
-        Ok(chunks
-            .iter()
-            .flat_map(|&chunk| self.encode_chunk(chunk))
-            .collect())
+            let mut result: Vec<Token> = Vec::new();
+            let mut last_end = 0;
+
+            for mat in special_pattern.find_iter(text).flatten() {
+                let start = mat.start();
+                let end = mat.end();
+
+                if last_end < start {
+                    result.append(&mut self.encode_ordinary(&text[last_end..start])?);
+                    if let Some(&id) = special_tokens.get(&mat.as_str()) {
+                        result.push(id as Token);
+                    }
+                    last_end = end;
+                }
+            }
+            if last_end < text.len() {
+                result.append(&mut self.encode_ordinary(&text[last_end..])?);
+            }
+
+            Ok(result)
+        } else {
+            self.encode_ordinary(text)
+        }
     }
 
     // decode a given token sequence to a String
-    pub fn decode(&self, tokens: &[Token]) -> Result<String> {
-        String::from_utf8(
-            tokens
-                .iter()
-                .flat_map(|&t| self.decode_token_to_bytes(t))
-                .collect(),
-        )
-        .with_context(|| "Fail to decode the given token sequence")
+    // if the special_tokens is not None, decode
+    // the special tokens to the special str
+    pub fn decode(
+        &self,
+        tokens: &[Token],
+        special_tokens: Option<HashMap<Token, &str>>,
+    ) -> Result<String> {
+        if let Some(special_tokens) = special_tokens {
+            let mut result:String = String::new();
+            let mut last_special = 0;
+
+            for (i, token) in tokens.iter().enumerate(){
+                if let Some(&str) = special_tokens.get(token) {
+                    result.push_str(&self.decode_ordinary(&tokens[last_special..i])?);
+                    result.push_str(str);
+                    last_special = i+1;
+                 }
+            }
+            if last_special < tokens.len() {
+                result.push_str(&self.decode_ordinary(&tokens[last_special..])?);
+            }
+
+            Ok(result)
+        } else {
+            self.decode_ordinary(tokens)
+        }
     }
 
     // dump the tokenizer into a file in the given path.
@@ -193,6 +238,22 @@ impl Default for Tokenizer {
 
 // Private Method
 impl Tokenizer {
+    // encode a string that ignores any special tokens.
+    fn encode_ordinary(&self, text: &str) -> Result<Vec<Token>> {
+        // Pre-tokenize
+        let pattern = fancy_regex::Regex::new(PATTERN_STR)?;
+        let chunks: Vec<&str> = pattern
+            .find_iter(text)
+            .filter_map(|m| m.ok())
+            .map(|m| m.as_str())
+            .collect();
+
+        Ok(chunks
+            .iter()
+            .flat_map(|&chunk| self.encode_chunk(chunk))
+            .collect())
+    }
+
     // encode a string chunk to a token sequence
     fn encode_chunk(&self, chunk: &str) -> Vec<Token> {
         let mut tokens: Vec<Token> = chunk.bytes().map(|c| c as Token).collect();
@@ -216,6 +277,17 @@ impl Tokenizer {
         }
 
         tokens
+    }
+
+    // decode a tokens sequence that ignores any special tokens.
+    fn decode_ordinary(&self, tokens: &[Token]) -> Result<String> {
+        String::from_utf8(
+            tokens
+                .iter()
+                .flat_map(|&t| self.decode_token_to_bytes(t))
+                .collect(),
+        )
+        .with_context(|| "Fail to decode the given token sequence")
     }
 
     // decode a token to a byte sequence
