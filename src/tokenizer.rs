@@ -28,28 +28,12 @@ pub struct Tokenizer {
 // for `save` and `lode`
 #[derive(Archive, Deserialize, Serialize)]
 struct TokenizerData {
-    pub vocabulary: Vec<Pair>,
-    pub merges_vec: Vec<(Pair, Token)>, // Store as a Vec for a more compact and faster loading experience.
+    vocabulary: Vec<Pair>,
+    merges_vec: Vec<(Pair, Token)>, // Store as a Vec for a more compact and faster loading experience.
 }
 
 // Public Method
 impl Tokenizer {
-    // Init the vocabulary to:
-    // 0 => { left: 0, right: 0}
-    // 1 => { left: 1, right: 0}
-    // ...
-    // 255 => { left: 255, right: 0}
-    pub fn new() -> Self {
-        let mut vocabulary = vec![];
-        for i in u8::MIN..=u8::MAX {
-            vocabulary.push(Pair(i as usize, 0));
-        }
-        Self {
-            vocabulary,
-            merges: HashMap::new(),
-        }
-    }
-
     pub fn train(&mut self, max_vocabulary_size: usize, path: &str, verbose: bool) -> Result<()> {
         if max_vocabulary_size < u8::MAX as usize {
             anyhow::bail!(
@@ -180,7 +164,7 @@ impl Tokenizer {
 
     // render the vocabulary as a String.
     pub fn vocabulary_to_text(&self) -> String {
-        let mut output = String::new();
+        let mut result = String::new();
         for (token, pair) in self.vocabulary.iter().enumerate() {
             if token <= u8::MAX as Token {
                 continue;
@@ -195,9 +179,9 @@ impl Tokenizer {
                     token, pair, error
                 ),
             };
-            output.push_str(&temp);
+            result.push_str(&temp);
         }
-        output
+        result
     }
 }
 
@@ -258,6 +242,22 @@ impl Tokenizer {
 
 // Associated Function
 impl Tokenizer {
+    // Init the vocabulary to:
+    // 0 => { left: 0, right: 0}
+    // 1 => { left: 1, right: 0}
+    // ...
+    // 255 => { left: 255, right: 0}
+    pub fn new() -> Self {
+        let mut vocabulary = Vec::with_capacity(u8::MAX as usize);
+        for i in u8::MIN..=u8::MAX {
+            vocabulary.push(Pair(i as usize, 0));
+        }
+        Self {
+            vocabulary,
+            merges: HashMap::new(),
+        }
+    }
+
     // Find the token pair that appears most frequently in the given tokens sequence
     // If the exclude_set is not None, it will also filter all tokens in the exclude_set
     // WARN: Because HashMap does not maintain any order of the key-value pairs,
