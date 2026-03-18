@@ -170,12 +170,13 @@ impl Tokenizer {
 
     // decode a given token id sequence to a String
     pub fn decode(&self, token_id_seq: &[TokenID]) -> Result<String> {
-        Ok(token_id_seq
-            .iter()
-            .map(|t| String::from_utf8(Self::decode_token_id_to_bytes(&self.vocabulary, *t)))
-            .collect::<Result<Vec<String>, std::string::FromUtf8Error>>()
-            .with_context(|| "Fail to decode the given token id sequence")?
-            .concat())
+        String::from_utf8(
+            token_id_seq
+                .iter()
+                .flat_map(|t| Self::decode_token_id_to_bytes(&self.vocabulary, *t))
+                .collect::<Vec<u8>>(),
+        )
+        .with_context(|| "Fail to decode the given token id sequence")
     }
 
     // dump the tokenizer (`vocabulary` and `tokens_map`) into a file in the given path.
