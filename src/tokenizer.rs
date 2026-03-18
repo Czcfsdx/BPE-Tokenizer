@@ -4,15 +4,16 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::read_to_string;
 
-type TokenID = usize;
+type Token = usize;
+
 // Pattern from: https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
 const PATTERN_STR: &str =
     r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, Archive, Deserialize, Serialize)]
-pub struct Token(TokenID, TokenID);
+pub struct Pair(Token, Token);
 
-impl fmt::Display for Token {
+impl fmt::Display for Pair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "({:>3}, {:>3})", self.0, self.1)
     }
@@ -20,16 +21,15 @@ impl fmt::Display for Token {
 
 #[derive(PartialEq, Eq, Debug)]
 pub struct Tokenizer {
-    vocabulary: Vec<Token>,              // for decode
-    tokens_map: HashMap<Token, TokenID>, // for encode
+    vocabulary: Vec<Pair>,        // for decode
+    merges: HashMap<Pair, Token>, // for encode
 }
 
 // for `save` and `lode`
 #[derive(Archive, Deserialize, Serialize)]
 struct TokenizerData {
-    pub vocabulary: Vec<Token>,
-    // Store as a Vec for a more compact and faster loading experience.
-    pub tokens_map_vec: Vec<(Token, TokenID)>,
+    pub vocabulary: Vec<Pair>,
+    pub merges_vec: Vec<(Pair, Token)>, // Store as a Vec for a more compact and faster loading experience.
 }
 
 // Public Method
@@ -42,11 +42,11 @@ impl Tokenizer {
     pub fn new() -> Self {
         let mut vocabulary = vec![];
         for i in u8::MIN..=u8::MAX {
-            vocabulary.push(Token(i as usize, 0));
+            vocabulary.push(Pair(i as usize, 0));
         }
         Self {
             vocabulary,
-            tokens_map: HashMap::new(),
+            merges: HashMap::new(),
         }
     }
 
@@ -63,20 +63,20 @@ impl Tokenizer {
         let pattern = fancy_regex::Regex::new(PATTERN_STR)?;
         let file_content = read_to_string(path)
             .with_context(|| format!("Failed to read from the file: {}", path))?;
+        // PERF: Maybe we can use HashMap<&str, usize> to store the crops and save more space
         let crops: Vec<&str> = pattern
             .find_iter(&file_content)
             .filter_map(|m| m.ok())
             .map(|m| m.as_str())
             .collect();
 
-        let mut crops_token_id_seq: Vec<Vec<TokenID>> = crops
+        let mut crops_tokens: Vec<Vec<Token>> = crops
             .iter()
-            .map(|s| s.bytes().map(|b| b as TokenID).collect::<Vec<TokenID>>())
+            .map(|s| s.bytes().map(|b| b as Token).collect::<Vec<Token>>())
             .collect();
 
         while self.vocabulary.len() <= max_vocabulary_size {
-            let Some((token, times)) = Self::find_most_frequent_token(&crops_token_id_seq, None)
-            else {
+            let Some((pair, times)) = Self::find_most_frequent_pair(&crops_tokens, None) else {
                 if verbose {
                     println!("New token not found");
                 }
@@ -91,29 +91,29 @@ impl Tokenizer {
                 break;
             }
 
-            let new_token_id = self.vocabulary.len();
-            crops_token_id_seq = crops_token_id_seq
+            let new_token = self.vocabulary.len();
+            crops_tokens = crops_tokens
                 .into_iter()
-                .map(|v| Self::replace_token_to_token_id(v, token, new_token_id))
+                .map(|v| Self::replace_pair_to_token(v, pair, new_token))
                 .collect();
-            self.vocabulary.push(token);
-            self.tokens_map.insert(token, new_token_id);
+            self.vocabulary.push(pair);
+            self.merges.insert(pair, new_token);
             if verbose {
-                let token_bytes = self.decode_token_id_to_bytes(new_token_id);
+                let token_bytes = self.decode_token_to_bytes(new_token);
                 match String::from_utf8(token_bytes) {
-                        Ok(token_string) => println!(
+                        Ok(token_str) => println!(
                             "New token {:>3} ({:>2} times) => {}: ({:?})",
-                            new_token_id,
+                            new_token,
                             times,
-                            token,
-                            token_string
+                            pair,
+                            token_str
                         ),
                     // Don't return this error, handle the error on-site.
                         Err(error) => println!(
                             "New token {:>3} ({:>2} times) => {} But error occurs when converting it to String: {}",
-                            new_token_id,
+                            new_token,
                             times,
-                            token,
+                            pair,
                             error
                         ),
                     }
@@ -122,8 +122,8 @@ impl Tokenizer {
         Ok(())
     }
 
-    // encode a given string text to a token id sequence
-    pub fn encode(&self, text: &str) -> Result<Vec<TokenID>> {
+    // encode a given string text to a token sequence
+    pub fn encode(&self, text: &str) -> Result<Vec<Token>> {
         // Pre-tokenize
         let pattern = fancy_regex::Regex::new(PATTERN_STR)?;
         let chunks: Vec<&str> = pattern
@@ -138,22 +138,22 @@ impl Tokenizer {
             .collect())
     }
 
-    // decode a given token id sequence to a String
-    pub fn decode(&self, token_id_seq: &[TokenID]) -> Result<String> {
+    // decode a given token sequence to a String
+    pub fn decode(&self, tokens: &[Token]) -> Result<String> {
         String::from_utf8(
-            token_id_seq
+            tokens
                 .iter()
-                .flat_map(|&t| self.decode_token_id_to_bytes(t))
-                .collect::<Vec<u8>>(),
+                .flat_map(|&t| self.decode_token_to_bytes(t))
+                .collect(),
         )
-        .with_context(|| "Fail to decode the given token id sequence")
+        .with_context(|| "Fail to decode the given token sequence")
     }
 
-    // dump the tokenizer (`vocabulary` and `tokens_map`) into a file in the given path.
+    // dump the tokenizer into a file in the given path.
     pub fn save(&self, path: &str) -> Result<()> {
         let data = TokenizerData {
             vocabulary: self.vocabulary.clone(),
-            tokens_map_vec: self.tokens_map.iter().map(|(k, v)| (*k, *v)).collect(),
+            merges_vec: self.merges.iter().map(|(k, v)| (*k, *v)).collect(),
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data)
             .with_context(|| "Fail to serialize the tokenizer model")?;
@@ -166,7 +166,7 @@ impl Tokenizer {
         Ok(())
     }
 
-    // load the tokenizer (`vocabulary` and `tokens_map`) form a file in the given path.
+    // load the tokenizer form a file in the given path.
     pub fn load(path: &str) -> Result<Self> {
         let bytes =
             std::fs::read(path).with_context(|| format!("Fail to read from the file: {}", path))?;
@@ -174,25 +174,25 @@ impl Tokenizer {
             .with_context(|| format!("Fail to deserialize the data from the file: {}", path))?;
         Ok(Self {
             vocabulary: data.vocabulary,
-            tokens_map: data.tokens_map_vec.into_iter().collect(),
+            merges: data.merges_vec.into_iter().collect(),
         })
     }
 
     // render the vocabulary as a String.
     pub fn vocabulary_to_text(&self) -> String {
         let mut output = String::new();
-        for (token_id, token) in self.vocabulary.iter().enumerate() {
-            if token_id <= u8::MAX as TokenID {
+        for (token, pair) in self.vocabulary.iter().enumerate() {
+            if token <= u8::MAX as Token {
                 continue;
             }
-            let temp = match String::from_utf8(self.decode_token_id_to_bytes(token_id)) {
-                Ok(token_string) => {
-                    format!("Token {:>3} => {}: ({:?})\n", token_id, token, token_string)
+            let temp = match String::from_utf8(self.decode_token_to_bytes(token)) {
+                Ok(token_str) => {
+                    format!("Token {:>3} => {}: ({:?})\n", token, pair, token_str)
                 }
                 // Don't return this error, handle the error on-site.
                 Err(error) => format!(
                     "Token {:>3} => {} But error occurs when converting it to String: {}\n",
-                    token_id, token, error
+                    token, pair, error
                 ),
             };
             output.push_str(&temp);
@@ -209,20 +209,20 @@ impl Default for Tokenizer {
 
 // Private Method
 impl Tokenizer {
-    // encode a string chunk to a token id sequence
-    fn encode_chunk(&self, chunk: &str) -> Vec<TokenID> {
-        let mut token_id_seq: Vec<TokenID> = chunk.bytes().map(|c| c as TokenID).collect();
+    // encode a string chunk to a token sequence
+    fn encode_chunk(&self, chunk: &str) -> Vec<Token> {
+        let mut tokens: Vec<Token> = chunk.bytes().map(|c| c as Token).collect();
 
-        if token_id_seq.len() < 2 {
-            return token_id_seq;
+        if tokens.len() < 2 {
+            return tokens;
         }
 
         let mut i: usize = 0;
-        while i < token_id_seq.len().saturating_sub(1) {
-            let token = Token(token_id_seq[i], token_id_seq[i + 1]);
-            if let Some(&token_id) = self.tokens_map.get(&token) {
-                token_id_seq[i] = token_id;
-                token_id_seq.remove(i + 1);
+        while i < tokens.len().saturating_sub(1) {
+            let pair = Pair(tokens[i], tokens[i + 1]);
+            if let Some(&new_token) = self.merges.get(&pair) {
+                tokens[i] = new_token;
+                tokens.remove(i + 1);
                 if i > 0 {
                     i = i.saturating_sub(1);
                 }
@@ -231,24 +231,24 @@ impl Tokenizer {
             }
         }
 
-        token_id_seq
+        tokens
     }
 
     // decode a token to a byte sequence
     // PERF: Implement some kind of cache to not decode the same token over and over again.
-    fn decode_token_id_to_bytes(&self, token_id: TokenID) -> Vec<u8> {
+    fn decode_token_to_bytes(&self, token: Token) -> Vec<u8> {
         let mut bytes: Vec<u8> = vec![];
-        let Token(left, right) = self.vocabulary[token_id];
-        if token_id == left {
+        let Pair(left, right) = self.vocabulary[token];
+        if token == left {
             debug_assert!(
-                token_id >= u8::MIN as usize && token_id <= u8::MAX as usize,
-                "token_id should in [0, 255], now is {}",
-                token_id
+                token >= u8::MIN as usize && token <= u8::MAX as usize,
+                "token should in [0, 255], now is {}",
+                token
             );
-            bytes.push(token_id as u8);
+            bytes.push(token as u8);
         } else {
-            let mut left_bytes = self.decode_token_id_to_bytes(left);
-            let mut right_bytes = self.decode_token_id_to_bytes(right);
+            let mut left_bytes = self.decode_token_to_bytes(left);
+            let mut right_bytes = self.decode_token_to_bytes(right);
             bytes.append(&mut left_bytes);
             bytes.append(&mut right_bytes);
         }
@@ -258,21 +258,21 @@ impl Tokenizer {
 
 // Associated Function
 impl Tokenizer {
-    // Find the token pair that appears most frequently in the given texts_token_id_seq
+    // Find the token pair that appears most frequently in the given tokens sequence
     // If the exclude_set is not None, it will also filter all tokens in the exclude_set
     // WARN: Because HashMap does not maintain any order of the key-value pairs,
-    // if there are multiple token_pairs that occur the most frequently,
+    // if there are multiple token pairs that occur the most frequently,
     // we can't assure that the same token will be selected each time.
-    fn find_most_frequent_token(
-        texts_token_id_seq: &[Vec<TokenID>],
-        exclude_set: Option<&HashSet<Token>>,
-    ) -> Option<(Token, usize)> {
-        let mut freq_table: HashMap<Token, usize> = HashMap::new();
-        for text in texts_token_id_seq {
+    fn find_most_frequent_pair(
+        tokens: &[Vec<Token>],
+        exclude_set: Option<&HashSet<Pair>>,
+    ) -> Option<(Pair, usize)> {
+        let mut freq_table: HashMap<Pair, usize> = HashMap::new();
+        for text in tokens {
             for w in text.windows(2) {
-                let token = Token(w[0], w[1]);
-                if exclude_set.is_none_or(|set| !set.contains(&token)) {
-                    freq_table.entry(token).and_modify(|v| *v += 1).or_insert(1);
+                let pair = Pair(w[0], w[1]);
+                if exclude_set.is_none_or(|set| !set.contains(&pair)) {
+                    freq_table.entry(pair).and_modify(|v| *v += 1).or_insert(1);
                 }
             }
         }
@@ -283,26 +283,20 @@ impl Tokenizer {
             .map(|(token, times)| (*token, *times))
     }
 
-    // Replace every form_token in token_id_seq to to_token_id
-    fn replace_token_to_token_id(
-        token_id_seq: Vec<TokenID>,
-        from_token: Token,
-        to_token_id: TokenID,
-    ) -> Vec<TokenID> {
-        let mut new_token_id_seq = Vec::with_capacity(token_id_seq.len());
+    // Replace every form_pair in tokens to to_token
+    fn replace_pair_to_token(tokens: Vec<Token>, from_pair: Pair, to_token: Token) -> Vec<Token> {
+        let mut new_tokens = Vec::with_capacity(tokens.len());
         let mut i: usize = 0;
-        while i < token_id_seq.len() {
-            if i + 1 < token_id_seq.len()
-                && Token(token_id_seq[i], token_id_seq[i + 1]) == from_token
-            {
-                new_token_id_seq.push(to_token_id);
+        while i < tokens.len() {
+            if i + 1 < tokens.len() && Pair(tokens[i], tokens[i + 1]) == from_pair {
+                new_tokens.push(to_token);
                 i += 2;
             } else {
-                new_token_id_seq.push(token_id_seq[i]);
+                new_tokens.push(tokens[i]);
                 i += 1;
             }
         }
-        new_token_id_seq.shrink_to_fit();
-        new_token_id_seq
+        new_tokens.shrink_to_fit();
+        new_tokens
     }
 }
