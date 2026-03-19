@@ -7,7 +7,7 @@ use std::fs::read_to_string;
 type Token = usize;
 
 // Pattern from: https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
-const DEFAULT_PATTERN_STR: &str =
+const DEFAULT_PATTERN: &str =
     r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, Archive, Deserialize, Serialize)]
@@ -43,11 +43,11 @@ struct TokenizerData {
 impl Tokenizer {
     pub fn train(&mut self, path: &str, verbose: bool) -> Result<()> {
         // Pre-tokenize
-        let pattern = fancy_regex::Regex::new(DEFAULT_PATTERN_STR)?;
+        let regex = fancy_regex::Regex::new(DEFAULT_PATTERN)?;
         let file_content = read_to_string(path)
             .with_context(|| format!("Failed to read from the file: {}", path))?;
         // PERF: Maybe we can use HashMap<&str, usize> to store the crops and save more space
-        let crops: Vec<&str> = pattern
+        let crops: Vec<&str> = regex
             .find_iter(&file_content)
             .filter_map(|m| m.ok())
             .map(|m| m.as_str())
@@ -109,19 +109,19 @@ impl Tokenizer {
     pub fn encode(&self, text: &str) -> Result<Vec<Token>> {
         if !self.inverse_special_tokens.is_empty() {
             // special tokens match
-            let special_pattern_str = self
+            let special_pattern = self
                 .inverse_special_tokens
                 .keys()
                 .map(|s| fancy_regex::escape(s).into_owned())
                 .collect::<Vec<String>>()
                 .join("|");
-            let special_pattern = fancy_regex::Regex::new(&special_pattern_str)
+            let special_regex = fancy_regex::Regex::new(&special_pattern)
                 .with_context(|| "Fail to turn special_tokens into regex expression")?;
 
             let mut result: Vec<Token> = Vec::new();
             let mut last_end = 0;
 
-            for mat in special_pattern.find_iter(text).flatten() {
+            for mat in special_regex.find_iter(text).flatten() {
                 let start = mat.start();
                 let end = mat.end();
 
@@ -238,8 +238,8 @@ impl Tokenizer {
     // encode a string that ignores any special tokens.
     fn encode_ordinary(&self, text: &str) -> Result<Vec<Token>> {
         // Pre-tokenize
-        let pattern = fancy_regex::Regex::new(DEFAULT_PATTERN_STR)?;
-        let chunks: Vec<&str> = pattern
+        let regex = fancy_regex::Regex::new(DEFAULT_PATTERN)?;
+        let chunks: Vec<&str> = regex
             .find_iter(text)
             .filter_map(|m| m.ok())
             .map(|m| m.as_str())
@@ -335,7 +335,7 @@ impl Tokenizer {
         Ok(Self {
             max_vocabulary_size,
             vocabulary,
-            pre_tokenizer_pattern: String::from(pre_tokenizer_pattern.unwrap_or(DEFAULT_PATTERN_STR)),
+            pre_tokenizer_pattern: String::from(pre_tokenizer_pattern.unwrap_or(DEFAULT_PATTERN)),
             merges: HashMap::new(),
             inverse_special_tokens: special_tokens_vec
                 .iter()
