@@ -316,7 +316,11 @@ impl Tokenizer {
     // 1 => { left: 1, right: 0}
     // ...
     // 255 => { left: 255, right: 0}
-    pub fn new(max_vocabulary_size: usize, pre_tokenizer_pattern: Option<&str>,special_tokens: &[&str]) -> Result<Self> {
+    pub fn new(
+        max_vocabulary_size: usize,
+        pre_tokenizer_pattern: Option<&str>,
+        special_tokens: &[&str],
+    ) -> Result<Self> {
         if max_vocabulary_size < u8::MAX as usize {
             anyhow::bail!(
                 "max_vocabulary_size must be greater than {}, now is {}",
