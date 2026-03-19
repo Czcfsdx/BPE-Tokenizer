@@ -171,6 +171,9 @@ impl Tokenizer {
 
     // dump the tokenizer into a file in the given path.
     pub fn save(&self, path: &str) -> Result<()> {
+        use std::fs::{write, create_dir_all};
+        use std::path::Path;
+
         let data = TokenizerData {
             max_vocabulary_size: self.max_vocabulary_size,
             pre_tokenizer_pattern: self.pre_tokenizer_pattern.clone(),
@@ -180,7 +183,12 @@ impl Tokenizer {
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data)
             .with_context(|| "Fail to serialize the tokenizer model")?;
-        std::fs::write(path, &bytes).with_context(|| {
+
+        if let Some(parent) = Path::new(path).parent() {
+            create_dir_all(parent)?;
+        }
+
+        write(path, &bytes).with_context(|| {
             format!(
                 "Fail to write the binary serialization of the tokenizer model to the file: {}",
                 path,
