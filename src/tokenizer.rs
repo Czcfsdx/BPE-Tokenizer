@@ -125,7 +125,7 @@ impl Tokenizer {
                 let start = mat.start();
                 let end = mat.end();
 
-                if last_end < start {
+                if last_end <= start {
                     result.append(&mut self.encode_ordinary(&text[last_end..start])?);
                     if let Some(&id) = self.inverse_special_tokens.get(mat.as_str()) {
                         result.push(id as Token);
