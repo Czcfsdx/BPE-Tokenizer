@@ -29,7 +29,7 @@ pub struct Tokenizer {
     inverse_special_tokens: HashMap<String, Token>,
 }
 
-// for `save` and `lode`
+// for `save` and `load`
 #[derive(Archive, Deserialize, Serialize)]
 struct TokenizerData {
     max_vocabulary_size: usize,
@@ -189,27 +189,6 @@ impl Tokenizer {
         Ok(())
     }
 
-    // load the tokenizer form a file in the given path.
-    pub fn load(path: &str) -> Result<Self> {
-        let bytes =
-            std::fs::read(path).with_context(|| format!("Fail to read from the file: {}", path))?;
-        let data = rkyv::from_bytes::<TokenizerData, rkyv::rancor::Error>(&bytes)
-            .with_context(|| format!("Fail to deserialize the data from the file: {}", path))?;
-        Ok(Self {
-            max_vocabulary_size: data.max_vocabulary_size,
-            pre_tokenizer_pattern: data.pre_tokenizer_pattern,
-            vocabulary: data.vocabulary,
-            merges: data.merges_vec.into_iter().collect(),
-            inverse_special_tokens: data
-                .special_tokens
-                .iter()
-                .enumerate()
-                .map(|(i, s)| (s.clone(), i + data.max_vocabulary_size))
-                .collect(),
-            special_tokens: data.special_tokens,
-        })
-    }
-
     // render the vocabulary as a String.
     pub fn vocabulary_to_text(&self) -> String {
         let mut result = String::new();
@@ -349,6 +328,28 @@ impl Tokenizer {
             special_tokens: special_tokens_vec,
         })
     }
+
+    // load the tokenizer form a file in the given path.
+    pub fn load(path: &str) -> Result<Self> {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("Fail to read from the file: {}", path))?;
+        let data = rkyv::from_bytes::<TokenizerData, rkyv::rancor::Error>(&bytes)
+            .with_context(|| format!("Fail to deserialize the data from the file: {}", path))?;
+        Ok(Self {
+            max_vocabulary_size: data.max_vocabulary_size,
+            pre_tokenizer_pattern: data.pre_tokenizer_pattern,
+            vocabulary: data.vocabulary,
+            merges: data.merges_vec.into_iter().collect(),
+            inverse_special_tokens: data
+                .special_tokens
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.clone(), i + data.max_vocabulary_size))
+                .collect(),
+            special_tokens: data.special_tokens,
+        })
+    }
+
 
     // Find the token pair that appears most frequently in the given tokens sequence
     // If the exclude_set is not None, it will also filter all tokens in the exclude_set
