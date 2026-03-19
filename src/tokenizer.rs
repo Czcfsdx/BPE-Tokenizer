@@ -7,7 +7,7 @@ use std::fs::read_to_string;
 type Token = usize;
 
 // Pattern from: https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
-const PATTERN_STR: &str =
+const DEFAULT_PATTERN_STR: &str =
     r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, Archive, Deserialize, Serialize)]
@@ -21,30 +21,29 @@ impl fmt::Display for Pair {
 
 #[derive(PartialEq, Eq, Debug)]
 pub struct Tokenizer {
+    max_vocabulary_size: usize,
+    pre_tokenizer_pattern: String,
     vocabulary: Vec<Pair>,        // for decode
     merges: HashMap<Pair, Token>, // for encode
+    special_tokens: Vec<String>,
+    inverse_special_tokens: HashMap<String, Token>,
 }
 
 // for `save` and `lode`
 #[derive(Archive, Deserialize, Serialize)]
 struct TokenizerData {
+    max_vocabulary_size: usize,
+    pre_tokenizer_pattern: String,
     vocabulary: Vec<Pair>,
     merges_vec: Vec<(Pair, Token)>, // Store as a Vec for a more compact and faster loading experience.
+    special_tokens: Vec<String>,
 }
 
 // Public Method
 impl Tokenizer {
-    pub fn train(&mut self, max_vocabulary_size: usize, path: &str, verbose: bool) -> Result<()> {
-        if max_vocabulary_size < u8::MAX as usize {
-            anyhow::bail!(
-                "max_vocabulary_size must be greater than {}, now is {}",
-                u8::MAX as usize,
-                max_vocabulary_size
-            );
-        }
-
+    pub fn train(&mut self, path: &str, verbose: bool) -> Result<()> {
         // Pre-tokenize
-        let pattern = fancy_regex::Regex::new(PATTERN_STR)?;
+        let pattern = fancy_regex::Regex::new(DEFAULT_PATTERN_STR)?;
         let file_content = read_to_string(path)
             .with_context(|| format!("Failed to read from the file: {}", path))?;
         // PERF: Maybe we can use HashMap<&str, usize> to store the crops and save more space
@@ -59,7 +58,7 @@ impl Tokenizer {
             .map(|s| s.bytes().map(|b| b as Token).collect::<Vec<Token>>())
             .collect();
 
-        while self.vocabulary.len() <= max_vocabulary_size {
+        while self.vocabulary.len() < self.max_vocabulary_size {
             let Some((pair, times)) = Self::find_most_frequent_pair(&crops_tokens, None) else {
                 if verbose {
                     println!("New token not found");
@@ -107,18 +106,13 @@ impl Tokenizer {
     }
 
     // encode a given string text to a token sequence
-    // if the special_tokens is not None, encode the special
-    // str to the special tokens
-    pub fn encode(
-        &self,
-        text: &str,
-        special_tokens: Option<HashMap<&str, Token>>,
-    ) -> Result<Vec<Token>> {
-        if let Some(special_tokens) = special_tokens {
+    pub fn encode(&self, text: &str) -> Result<Vec<Token>> {
+        if !self.inverse_special_tokens.is_empty() {
             // special tokens match
-            let special_pattern_str = special_tokens
+            let special_pattern_str = self
+                .inverse_special_tokens
                 .keys()
-                .map(|&s| fancy_regex::escape(s).into_owned())
+                .map(|s| fancy_regex::escape(s).into_owned())
                 .collect::<Vec<String>>()
                 .join("|");
             let special_pattern = fancy_regex::Regex::new(&special_pattern_str)
@@ -133,7 +127,7 @@ impl Tokenizer {
 
                 if last_end < start {
                     result.append(&mut self.encode_ordinary(&text[last_end..start])?);
-                    if let Some(&id) = special_tokens.get(&mat.as_str()) {
+                    if let Some(&id) = self.inverse_special_tokens.get(mat.as_str()) {
                         result.push(id as Token);
                     }
                     last_end = end;
@@ -150,23 +144,20 @@ impl Tokenizer {
     }
 
     // decode a given token sequence to a String
-    // if the special_tokens is not None, decode
-    // the special tokens to the special str
-    pub fn decode(
-        &self,
-        tokens: &[Token],
-        special_tokens: Option<HashMap<Token, &str>>,
-    ) -> Result<String> {
-        if let Some(special_tokens) = special_tokens {
-            let mut result:String = String::new();
+    pub fn decode(&self, tokens: &[Token]) -> Result<String> {
+        if !self.special_tokens.is_empty() {
+            let mut result: String = String::new();
             let mut last_special = 0;
 
-            for (i, token) in tokens.iter().enumerate(){
-                if let Some(&str) = special_tokens.get(token) {
+            for (i, &token) in tokens.iter().enumerate() {
+                // whether the token is a special token
+                if token >= self.max_vocabulary_size {
                     result.push_str(&self.decode_ordinary(&tokens[last_special..i])?);
-                    result.push_str(str);
-                    last_special = i+1;
-                 }
+                    if let Some(str) = self.special_tokens.get(token - self.max_vocabulary_size) {
+                        result.push_str(str);
+                    }
+                    last_special = i + 1;
+                }
             }
             if last_special < tokens.len() {
                 result.push_str(&self.decode_ordinary(&tokens[last_special..])?);
@@ -181,8 +172,11 @@ impl Tokenizer {
     // dump the tokenizer into a file in the given path.
     pub fn save(&self, path: &str) -> Result<()> {
         let data = TokenizerData {
+            max_vocabulary_size: self.max_vocabulary_size,
+            pre_tokenizer_pattern: self.pre_tokenizer_pattern.clone(),
             vocabulary: self.vocabulary.clone(),
             merges_vec: self.merges.iter().map(|(k, v)| (*k, *v)).collect(),
+            special_tokens: self.special_tokens.clone(),
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data)
             .with_context(|| "Fail to serialize the tokenizer model")?;
@@ -202,8 +196,17 @@ impl Tokenizer {
         let data = rkyv::from_bytes::<TokenizerData, rkyv::rancor::Error>(&bytes)
             .with_context(|| format!("Fail to deserialize the data from the file: {}", path))?;
         Ok(Self {
+            max_vocabulary_size: data.max_vocabulary_size,
+            pre_tokenizer_pattern: data.pre_tokenizer_pattern,
             vocabulary: data.vocabulary,
             merges: data.merges_vec.into_iter().collect(),
+            inverse_special_tokens: data
+                .special_tokens
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.clone(), i + data.max_vocabulary_size))
+                .collect(),
+            special_tokens: data.special_tokens,
         })
     }
 
@@ -230,18 +233,12 @@ impl Tokenizer {
     }
 }
 
-impl Default for Tokenizer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // Private Method
 impl Tokenizer {
     // encode a string that ignores any special tokens.
     fn encode_ordinary(&self, text: &str) -> Result<Vec<Token>> {
         // Pre-tokenize
-        let pattern = fancy_regex::Regex::new(PATTERN_STR)?;
+        let pattern = fancy_regex::Regex::new(DEFAULT_PATTERN_STR)?;
         let chunks: Vec<&str> = pattern
             .find_iter(text)
             .filter_map(|m| m.ok())
@@ -319,15 +316,34 @@ impl Tokenizer {
     // 1 => { left: 1, right: 0}
     // ...
     // 255 => { left: 255, right: 0}
-    pub fn new() -> Self {
+    pub fn new(max_vocabulary_size: usize, pre_tokenizer_pattern: Option<&str>,special_tokens: &[&str]) -> Result<Self> {
+        if max_vocabulary_size < u8::MAX as usize {
+            anyhow::bail!(
+                "max_vocabulary_size must be greater than {}, now is {}",
+                u8::MAX as usize,
+                max_vocabulary_size
+            );
+        }
+
+        let special_tokens_vec: Vec<String> =
+            special_tokens.iter().map(|&s| String::from(s)).collect();
         let mut vocabulary = Vec::with_capacity(u8::MAX as usize);
         for i in u8::MIN..=u8::MAX {
             vocabulary.push(Pair(i as usize, 0));
         }
-        Self {
+
+        Ok(Self {
+            max_vocabulary_size,
             vocabulary,
+            pre_tokenizer_pattern: String::from(pre_tokenizer_pattern.unwrap_or(DEFAULT_PATTERN_STR)),
             merges: HashMap::new(),
-        }
+            inverse_special_tokens: special_tokens_vec
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.clone(), i + max_vocabulary_size))
+                .collect(),
+            special_tokens: special_tokens_vec,
+        })
     }
 
     // Find the token pair that appears most frequently in the given tokens sequence
