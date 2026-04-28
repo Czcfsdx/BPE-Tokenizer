@@ -85,22 +85,16 @@ impl Tokenizer {
             if verbose {
                 let token_bytes = self.decode_token_to_bytes(new_token);
                 match String::from_utf8(token_bytes) {
-                        Ok(token_str) => println!(
-                            "New token {:>3} ({:>2} times) => {}: ({:?})",
-                            new_token,
-                            times,
-                            pair,
-                            token_str
-                        ),
+                    Ok(token_str) => println!(
+                        "New token {:>3} ({:>2} times) => {}: ({:?})",
+                        new_token, times, pair, token_str
+                    ),
                     // Don't return this error, handle the error on-site.
-                        Err(error) => println!(
-                            "New token {:>3} ({:>2} times) => {} But error occurs when converting it to String: {}",
-                            new_token,
-                            times,
-                            pair,
-                            error
-                        ),
-                    }
+                    Err(error) => println!(
+                        "New token {:>3} ({:>2} times) => {} But error occurs when converting it to String: {}",
+                        new_token, times, pair, error
+                    ),
+                }
             }
         }
         Ok(())
@@ -172,7 +166,7 @@ impl Tokenizer {
 
     // dump the tokenizer into a file in the given path.
     pub fn save(&self, path: &str) -> Result<()> {
-        use std::fs::{write, create_dir_all};
+        use std::fs::{create_dir_all, write};
         use std::path::Path;
 
         let data = TokenizerData {
@@ -363,7 +357,6 @@ impl Tokenizer {
             special_tokens: data.special_tokens,
         })
     }
-
 
     // Find the token pair that appears most frequently in the given tokens sequence
     // If the exclude_set is not None, it will also filter all tokens in the exclude_set

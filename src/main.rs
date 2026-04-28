@@ -14,7 +14,6 @@ fn main() {
         .unwrap_or_else(|e| eprintln_error(e));
     println!("{}", model.vocabulary_to_text());
 
-
     const TEXT: &str = "Hello, World";
     let tokens = model.encode(TEXT).unwrap_or_else(|e| eprintln_error(e));
     println!("Encode result: {:?}\n", tokens);
