@@ -20,10 +20,10 @@ use tokenizer::Tokenizer;
 
 fn main() -> anyhow::Result<()> {
     // Create tokenizer with vocabulary size 100000, 2 special tokens
-    let mut model = Tokenizer::new(100000, None, &["<|beginoftext|>", "<|endoftext|>"])?;
+    let mut model = Tokenizer::new("examples/example.conf")?;
 
     // Train
-    model.train("path/to/training_text.txt", false)?;
+    model.train(false)?;
 
     // Encode
     let tokens = model.encode("Hello, World")?;
