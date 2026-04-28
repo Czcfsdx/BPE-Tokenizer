@@ -1,4 +1,3 @@
-mod tests;
 mod tokenizer;
 
 fn main() {
