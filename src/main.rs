@@ -3,8 +3,7 @@ mod tokenizer;
 
 fn main() {
     // Train the BPE tokenizer
-    const CONFIG_PATH: &str = "example/example.conf";
-
+    const CONFIG_PATH: &str = "examples/example.conf";
     let mut model = tokenizer::Tokenizer::new(CONFIG_PATH).unwrap_or_else(|e| eprintln_error(e));
 
     model
