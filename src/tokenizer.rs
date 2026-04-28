@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fs::read_to_string;
 
 type Token = usize;
 
@@ -43,10 +42,12 @@ struct TokenizerData {
 impl Tokenizer {
     pub fn train(&mut self, path: &str, verbose: bool) -> Result<()> {
         // Pre-tokenize
-        let regex = fancy_regex::Regex::new(DEFAULT_PATTERN)?;
-        let file_content = read_to_string(path)
+        let regex = fancy_regex::Regex::new(&self.pre_tokenizer_pattern)?;
+        // TODO: Don't read all content in once.
+        let file_content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read from the file: {}", path))?;
-        // PERF: Maybe we can use HashMap<&str, usize> to store the corpus and save more space
+        // TODO: Maybe we can use HashMap<&str, usize> to store the corpus and save more space
+        // TODO: ignore special tokens
         let corpus: Vec<&str> = regex
             .find_iter(&file_content)
             .filter_map(|m| m.ok())
@@ -198,6 +199,7 @@ impl Tokenizer {
     }
 
     // render the vocabulary as a String.
+    // TODO: display trait?
     pub fn vocabulary_to_text(&self) -> String {
         let mut result = String::new();
         for (token, pair) in self.vocabulary.iter().enumerate() {
@@ -225,7 +227,7 @@ impl Tokenizer {
     // encode a string that ignores any special tokens.
     fn encode_ordinary(&self, text: &str) -> Result<Vec<Token>> {
         // Pre-tokenize
-        let regex = fancy_regex::Regex::new(DEFAULT_PATTERN)?;
+        let regex = fancy_regex::Regex::new(&self.pre_tokenizer_pattern)?;
         let chunks: Vec<&str> = regex
             .find_iter(text)
             .filter_map(|m| m.ok())
@@ -298,16 +300,14 @@ impl Tokenizer {
 
 // Associated Function
 impl Tokenizer {
-    // Init the vocabulary to:
-    // 0 => { left: 0, right: 0}
-    // 1 => { left: 1, right: 0}
-    // ...
-    // 255 => { left: 255, right: 0}
     pub fn new(
         max_vocabulary_size: usize,
         pre_tokenizer_pattern: Option<&str>,
         special_tokens: &[&str],
     ) -> Result<Self> {
+        // TODO: check if max_vocabulary_size is smaller than
+        // u8::MAX + special_tokens.len()
+        // and don't forget to modify the example.conf
         if max_vocabulary_size < u8::MAX as usize {
             anyhow::bail!(
                 "max_vocabulary_size must be greater than {}, now is {}",
@@ -319,9 +319,15 @@ impl Tokenizer {
         let special_tokens_vec: Vec<String> =
             special_tokens.iter().map(|&s| String::from(s)).collect();
         let mut vocabulary = Vec::with_capacity(u8::MAX as usize);
+        // Initial the vocabulary to:
+        // 0 => { left: 0, right: 0}
+        // 1 => { left: 1, right: 0}
+        // ...
+        // 255 => { left: 255, right: 0}
         for i in u8::MIN..=u8::MAX {
             vocabulary.push(Pair(i as usize, 0));
         }
+        // TODO: should we push special_tokens to initial value of vocabulary?
 
         Ok(Self {
             max_vocabulary_size,
