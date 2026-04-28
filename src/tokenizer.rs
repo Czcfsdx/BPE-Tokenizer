@@ -38,6 +38,15 @@ struct TokenizerData {
     special_tokens: Vec<String>,
 }
 
+// for configuration parse
+#[derive(PartialEq, Eq, Debug)]
+struct TokenizerConfig {
+    max_vocabulary_size: usize,
+    pre_tokenizer_pattern: String,
+    special_tokens: Vec<String>,
+    train_path: String,
+}
+
 // Public Method
 impl Tokenizer {
     pub fn train(&mut self, path: &str, verbose: bool) -> Result<()> {
@@ -294,46 +303,33 @@ impl Tokenizer {
 
 // Associated Function
 impl Tokenizer {
-    pub fn new(
-        max_vocabulary_size: usize,
-        pre_tokenizer_pattern: Option<&str>,
-        special_tokens: &[&str],
-    ) -> Result<Self> {
-        // TODO: check if max_vocabulary_size is smaller than
-        // u8::MAX + special_tokens.len()
-        // and don't forget to modify the example.conf
-        if max_vocabulary_size < u8::MAX as usize {
-            anyhow::bail!(
-                "max_vocabulary_size must be greater than {}, now is {}",
-                u8::MAX as usize,
-                max_vocabulary_size
-            );
-        }
+    pub fn new(config_file: &str) -> Result<Self> {
+        let config = TokenizerConfig::parse_config_file(config_file)?;
 
-        let special_tokens_vec: Vec<String> =
-            special_tokens.iter().map(|&s| String::from(s)).collect();
-        let mut vocabulary = Vec::with_capacity(u8::MAX as usize);
         // Initial the vocabulary to:
         // 0 => { left: 0, right: 0}
         // 1 => { left: 1, right: 0}
         // ...
         // 255 => { left: 255, right: 0}
+        let mut vocabulary = Vec::with_capacity(u8::MAX as usize);
         for i in u8::MIN..=u8::MAX {
             vocabulary.push(Pair(i as usize, 0));
         }
-        // TODO: should we push special_tokens to initial value of vocabulary?
+
+        let inverse_special_tokens = config
+            .special_tokens
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.clone(), i + config.max_vocabulary_size))
+            .collect();
 
         Ok(Self {
-            max_vocabulary_size,
+            max_vocabulary_size: config.max_vocabulary_size,
+            pre_tokenizer_pattern: config.pre_tokenizer_pattern,
+            special_tokens: config.special_tokens,
             vocabulary,
-            pre_tokenizer_pattern: String::from(pre_tokenizer_pattern.unwrap_or(DEFAULT_PATTERN)),
             merges: HashMap::new(),
-            inverse_special_tokens: special_tokens_vec
-                .iter()
-                .enumerate()
-                .map(|(i, s)| (s.clone(), i + max_vocabulary_size))
-                .collect(),
-            special_tokens: special_tokens_vec,
+            inverse_special_tokens,
         })
     }
 
@@ -398,5 +394,74 @@ impl Tokenizer {
         }
         new_tokens.shrink_to_fit();
         new_tokens
+    }
+}
+
+impl TokenizerConfig {
+    fn parse_config_file(path: &str) -> Result<Self> {
+        let mut max_vocabulary_size: Option<usize> = None;
+        let mut train_path: Option<String> = None;
+        let mut pre_tokenizer_pattern: Option<String> = None;
+        let mut special_tokens: Option<Vec<String>> = None;
+
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+        let file = File::open(path)
+            .with_context(|| format!("Fail to read from the configuration file: {}", path))?;
+        let file = BufReader::new(file);
+        for line in file.lines() {
+            let line = line?;
+
+            // Ignore comment
+            let content = match line.split_once('#') {
+                Some((before, _)) => before.trim(),
+                None => line.trim(),
+            };
+            if content.is_empty() {
+                continue;
+            };
+
+            let Some((key, value)) = content.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim();
+
+            match key {
+                "max_vocabulary_size" => max_vocabulary_size = Some(
+                    value.parse().with_context(|| format!("Fail to parse max_vocabulary_size from \"{value}\". Please check your configuration file: {path}"))?
+                ),
+                "train_path" => train_path = Some(String::from(value)),
+                "pre_tokenizer_pattern" => pre_tokenizer_pattern = Some(String::from(value)),
+                "special_tokens" => special_tokens = Some(
+                    value.split(',')
+                        .filter_map(|s| {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed.to_string())
+                            }
+                        })
+                        .collect()
+                ),
+                _ => continue,
+            };
+        }
+
+        let max_vocabulary_size = max_vocabulary_size.ok_or(anyhow::anyhow!(
+            "Fail to found max_vocabulary_size.\nPlease check your configuration file: {path}"
+        ))?;
+        let train_path = train_path.ok_or(anyhow::anyhow!(
+            "Fail to found train_path.\nPlease check your configuration file: {path}"
+        ))?;
+        let special_tokens = special_tokens.unwrap_or_default();
+        let pre_tokenizer_pattern = pre_tokenizer_pattern.unwrap_or(DEFAULT_PATTERN.to_string());
+        Ok(TokenizerConfig {
+            max_vocabulary_size,
+            pre_tokenizer_pattern,
+            special_tokens,
+            train_path,
+        })
     }
 }

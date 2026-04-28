@@ -3,22 +3,23 @@ mod tokenizer;
 
 fn main() {
     // Train the BPE tokenizer
-    const MAX_VOCABULARY_SIZE: usize = 100000;
-    const TRAIN_CORPUS_PATH: &str = "src/tokenizer.rs";
-    const SPECIAL_TOKENS: [&str; 3] = ["<|beginoftext|>", "<|middleoftext|>", "<|endoftext|>"];
+    const CONFIG_PATH: &str = "example/example.conf";
 
-    let mut model = tokenizer::Tokenizer::new(MAX_VOCABULARY_SIZE, None, &SPECIAL_TOKENS)
-        .unwrap_or_else(|e| eprintln_error(e));
+    let mut model = tokenizer::Tokenizer::new(CONFIG_PATH).unwrap_or_else(|e| eprintln_error(e));
+
     model
-        .train(TRAIN_CORPUS_PATH, false)
+        .train(false)
         .unwrap_or_else(|e| eprintln_error(e));
-    println!("{}", model.vocabulary_to_text());
 
-    const TEXT: &str = "Hello, World";
+    model.save("models/example.bin").unwrap_or_else(|e| eprintln_error(e));
+    let loaded_model = tokenizer::Tokenizer::load("models/example.bin").unwrap_or_else(|e| eprintln_error(e));
+    assert_eq!(model, loaded_model);
+
+    const TEXT: &str = "<|beginoftext|>Hello,<|middleoftext|> World!<|endoftext|>";
     let tokens = model.encode(TEXT).unwrap_or_else(|e| eprintln_error(e));
-    println!("Encode result: {:?}\n", tokens);
+    println!("Encode result: {:?}", tokens);
     let decoded_text = model.decode(&tokens).unwrap_or_else(|e| eprintln_error(e));
-    println!("Decode result: {}\n", decoded_text);
+    println!("Decode result: {}", decoded_text);
 }
 
 fn eprintln_error(error: anyhow::Error) -> ! {
