@@ -4,13 +4,13 @@ mod tokenizer;
 fn main() {
     // Train the BPE tokenizer
     const MAX_VOCABULARY_SIZE: usize = 100000;
-    const TRAIN_CROPS_PATH: &str = "src/tokenizer.rs";
+    const TRAIN_CORPUS_PATH: &str = "src/tokenizer.rs";
     const SPECIAL_TOKENS: [&str; 3] = ["<|beginoftext|>", "<|middleoftext|>", "<|endoftext|>"];
 
     let mut model = tokenizer::Tokenizer::new(MAX_VOCABULARY_SIZE, None, &SPECIAL_TOKENS)
         .unwrap_or_else(|e| eprintln_error(e));
     model
-        .train(TRAIN_CROPS_PATH, false)
+        .train(TRAIN_CORPUS_PATH, false)
         .unwrap_or_else(|e| eprintln_error(e));
     println!("{}", model.vocabulary_to_text());
 

@@ -46,20 +46,20 @@ impl Tokenizer {
         let regex = fancy_regex::Regex::new(DEFAULT_PATTERN)?;
         let file_content = read_to_string(path)
             .with_context(|| format!("Failed to read from the file: {}", path))?;
-        // PERF: Maybe we can use HashMap<&str, usize> to store the crops and save more space
-        let crops: Vec<&str> = regex
+        // PERF: Maybe we can use HashMap<&str, usize> to store the corpus and save more space
+        let corpus: Vec<&str> = regex
             .find_iter(&file_content)
             .filter_map(|m| m.ok())
             .map(|m| m.as_str())
             .collect();
 
-        let mut crops_tokens: Vec<Vec<Token>> = crops
+        let mut corpus_tokens: Vec<Vec<Token>> = corpus
             .iter()
             .map(|s| s.bytes().map(|b| b as Token).collect::<Vec<Token>>())
             .collect();
 
         while self.vocabulary.len() < self.max_vocabulary_size {
-            let Some((pair, times)) = Self::find_most_frequent_pair(&crops_tokens, None) else {
+            let Some((pair, times)) = Self::find_most_frequent_pair(&corpus_tokens, None) else {
                 if verbose {
                     println!("New token not found");
                 }
@@ -75,7 +75,7 @@ impl Tokenizer {
             }
 
             let new_token = self.vocabulary.len();
-            crops_tokens = crops_tokens
+            corpus_tokens = corpus_tokens
                 .into_iter()
                 .map(|v| Self::replace_pair_to_token(v, pair, new_token))
                 .collect();
