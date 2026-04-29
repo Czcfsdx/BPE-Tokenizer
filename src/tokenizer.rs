@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use fancy_regex::Regex;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -35,7 +35,6 @@ struct TokenizerData {
     max_vocabulary_size: usize,
     pre_tokenizer_pattern: String,
     special_tokens: Vec<String>,
-    train_path: String,
     vocabulary: Vec<Pair>,
     merges_vec: Vec<(Pair, Token)>, // Store as a Vec for a more compact and faster loading experience.
 }
@@ -46,17 +45,29 @@ struct TokenizerConfig {
     max_vocabulary_size: usize,
     pre_tokenizer_pattern: String,
     special_tokens: Vec<String>,
-    train_path: String,
+    train_path: Option<String>,
+    verbose: bool,
+    save_path: Option<String>,
 }
 
 // Public Method
 impl Tokenizer {
-    pub fn train(&mut self, verbose: bool) -> Result<()> {
+    pub fn train(&mut self) -> Result<()> {
         // Pre-tokenize
-        let regex = Regex::new(&self.config.pre_tokenizer_pattern)?;
+        let pattern = &self.config.pre_tokenizer_pattern;
+        if pattern.is_empty() {
+            bail!("Fail to found pre_tokenizer_pattern in training!")
+        }
+        let regex = Regex::new(pattern)?;
+
         // TODO: Don't read all content in once.
-        let file_content = fs::read_to_string(&self.config.train_path)
-            .with_context(|| format!("Failed to read from the file: {}", self.config.train_path))?;
+        let Some(path) = self.config.train_path.as_deref() else {
+            bail!(
+                "Fail to found train_path in training! Maybe because you want to retrain a model which is loaded from a binary serialization."
+            )
+        };
+        let file_content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read from the file: {}", path))?;
         // TODO: Maybe we can use HashMap<&str, usize> to store the corpus and save more space
         let corpus: Vec<&str> = regex
             .find_iter(&file_content)
@@ -69,6 +80,7 @@ impl Tokenizer {
             .map(|s| s.bytes().map(|b| b as Token).collect::<Vec<Token>>())
             .collect();
 
+        let verbose = self.config.verbose;
         for index in 1..=self.config.max_vocabulary_size {
             let Some((pair, times)) = Self::find_most_frequent_pair(&corpus_tokens, None) else {
                 if verbose {
@@ -176,18 +188,22 @@ impl Tokenizer {
     }
 
     // dump the tokenizer into a file in the given path.
-    pub fn save(&self, path: &str) -> Result<()> {
+    pub fn save(&self) -> Result<()> {
         let data = TokenizerData {
             max_vocabulary_size: self.config.max_vocabulary_size,
             pre_tokenizer_pattern: self.config.pre_tokenizer_pattern.clone(),
             special_tokens: self.config.special_tokens.clone(),
-            train_path: self.config.train_path.clone(),
             vocabulary: self.vocabulary.clone(),
             merges_vec: self.merges.iter().map(|(k, v)| (*k, *v)).collect(),
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data)
             .with_context(|| "Fail to serialize the tokenizer model")?;
 
+        let Some(path) = self.config.save_path.as_deref() else {
+            bail!(
+                "Fail to found save_path in saving! Maybe because you want to resave a model which is loaded from a binary serialization."
+            )
+        };
         if let Some(parent) = std::path::Path::new(path).parent() {
             fs::create_dir_all(parent)?;
         }
@@ -220,7 +236,12 @@ impl fmt::Display for Tokenizer {
         }
         for (token, str) in self.config.special_tokens.iter().enumerate() {
             let min_special_token = self.config.max_vocabulary_size + (u8::MAX as usize) + 1;
-            writeln!(f, "Special Token {} => {:?}", token + min_special_token, str)?
+            writeln!(
+                f,
+                "Special Token {} => {:?}",
+                token + min_special_token,
+                str
+            )?
         }
         Ok(())
     }
@@ -231,7 +252,11 @@ impl Tokenizer {
     // encode a string that ignores any special tokens.
     fn encode_ordinary(&self, text: &str) -> Result<Vec<Token>> {
         // Pre-tokenize
-        let regex = Regex::new(&self.config.pre_tokenizer_pattern)?;
+        let pattern = &self.config.pre_tokenizer_pattern;
+        if pattern.is_empty() {
+            bail!("Fail to found pre_tokenizer_pattern in training!")
+        }
+        let regex = Regex::new(pattern)?;
         let chunks: Vec<&str> = regex
             .find_iter(text)
             .filter_map(|m| m.ok())
@@ -343,7 +368,9 @@ impl Tokenizer {
             max_vocabulary_size: data.max_vocabulary_size,
             pre_tokenizer_pattern: data.pre_tokenizer_pattern,
             special_tokens: data.special_tokens,
-            train_path: data.train_path,
+            train_path: None,
+            verbose: false,
+            save_path: None,
         };
         let min_special_token = data.max_vocabulary_size + (u8::MAX as usize) + 1;
         let inverse_special_tokens = config
@@ -406,9 +433,11 @@ impl Tokenizer {
 impl TokenizerConfig {
     fn parse_config_file(path: &str) -> Result<Self> {
         let mut max_vocabulary_size: Option<usize> = None;
-        let mut train_path: Option<String> = None;
         let mut pre_tokenizer_pattern: Option<String> = None;
         let mut special_tokens: Option<Vec<String>> = None;
+        let mut train_path: Option<String> = None;
+        let mut verbose: bool = false;
+        let mut save_path: Option<String> = None;
 
         let file = fs::File::open(path)
             .with_context(|| format!("Fail to read from the configuration file: {}", path))?;
@@ -425,6 +454,12 @@ impl TokenizerConfig {
                 continue;
             };
 
+            // parse verbose
+            if content == "verbose" {
+                verbose = true;
+                continue;
+            }
+
             let Some((key, value)) = content.split_once('=') else {
                 continue;
             };
@@ -435,7 +470,6 @@ impl TokenizerConfig {
                 "max_vocabulary_size" => max_vocabulary_size = Some(
                     value.parse().with_context(|| format!("Fail to parse max_vocabulary_size from \"{value}\". Please check your configuration file: {path}"))?
                 ),
-                "train_path" => train_path = Some(String::from(value)),
                 "pre_tokenizer_pattern" => pre_tokenizer_pattern = Some(String::from(value)),
                 "special_tokens" => special_tokens = Some(
                     value.split(',')
@@ -449,15 +483,20 @@ impl TokenizerConfig {
                         })
                         .collect()
                 ),
+                "train_path" => train_path = Some(String::from(value)),
+                "save_path" => save_path = Some(String::from(value)),
                 _ => continue,
             };
         }
 
-        let max_vocabulary_size = max_vocabulary_size.ok_or(anyhow::anyhow!(
+        let max_vocabulary_size = max_vocabulary_size.ok_or(anyhow!(
             "Fail to found max_vocabulary_size.\nPlease check your configuration file: {path}"
         ))?;
-        let train_path = train_path.ok_or(anyhow::anyhow!(
+        let train_path = train_path.ok_or(anyhow!(
             "Fail to found train_path.\nPlease check your configuration file: {path}"
+        ))?;
+        let save_path = save_path.ok_or(anyhow!(
+            "Fail to found save_path.\nPlease check your configuration file: {path}"
         ))?;
         let special_tokens = special_tokens.unwrap_or_default();
         let pre_tokenizer_pattern = pre_tokenizer_pattern.unwrap_or(DEFAULT_PATTERN.to_string());
@@ -465,7 +504,9 @@ impl TokenizerConfig {
             max_vocabulary_size,
             pre_tokenizer_pattern,
             special_tokens,
-            train_path,
+            train_path: Some(train_path),
+            verbose,
+            save_path: Some(save_path),
         })
     }
 }
@@ -475,34 +516,52 @@ mod tests {
     use super::*;
 
     fn create_test_tokenizer() -> Tokenizer {
-        const CONFIG_PATH: &str = "examples/example.conf";
+        const CONFIG_PATH: &str = "tests/test.conf";
         let mut model = Tokenizer::new(CONFIG_PATH).expect("Failed to create tokenizer");
-        model.train(false).expect("Failed to train tokenizer");
+        model.train().expect("Failed to train tokenizer");
         model
     }
 
     #[test]
     fn test_create() {
         const MAX_VOCABULARY_SIZE: usize = 200;
-        const TRAIN_CROPS_PATH: &str = "tests/bpe-wiki.txt";
         const SPECIAL_TOKENS: [&str; 3] = ["<|beginoftext|>", "<|middleoftext|>", "<|endoftext|>"];
         const PATTERN: &str =
             r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
+        const TRAIN_CROPS_PATH: &str = "tests/bpe-wiki.txt";
+        const VERBOSE: bool = true;
+        const SAVE_PATH: &str = "tests/test.bin";
         const CONFIG_PATH: &str = "tests/test.conf";
         let model = Tokenizer::new(CONFIG_PATH).expect("Failed to create tokenizer");
         assert_eq!(model.config.pre_tokenizer_pattern, PATTERN);
         assert_eq!(model.config.max_vocabulary_size, MAX_VOCABULARY_SIZE);
         assert_eq!(model.config.special_tokens, SPECIAL_TOKENS);
-        assert_eq!(model.config.train_path, TRAIN_CROPS_PATH);
+        assert_eq!(model.config.train_path.as_deref(), Some(TRAIN_CROPS_PATH));
+        assert_eq!(model.config.verbose, VERBOSE);
+        assert_eq!(model.config.save_path.as_deref(), Some(SAVE_PATH));
     }
 
     #[test]
     fn test_save_and_load() {
         let model = create_test_tokenizer();
         const MODEL_PATH: &str = "tests/test.bin";
-        model.save(MODEL_PATH).expect("Failed to save model");
+        model.save().expect("Failed to save model");
         let new_model = Tokenizer::load(MODEL_PATH).expect("Failed to load model");
-        assert_eq!(model, new_model);
+        assert_eq!(
+            model.config.pre_tokenizer_pattern,
+            new_model.config.pre_tokenizer_pattern
+        );
+        assert_eq!(
+            model.config.max_vocabulary_size,
+            new_model.config.max_vocabulary_size
+        );
+        assert_eq!(model.config.special_tokens, new_model.config.special_tokens);
+        assert_eq!(model.vocabulary, new_model.vocabulary);
+        assert_eq!(model.merges, new_model.merges);
+        assert_eq!(
+            model.inverse_special_tokens,
+            new_model.inverse_special_tokens
+        );
     }
 
     #[test]

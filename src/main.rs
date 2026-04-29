@@ -6,12 +6,12 @@ fn main() {
     let mut model = tokenizer::Tokenizer::new(CONFIG_PATH).unwrap_or_else(|e| eprintln_error(e));
 
     model
-        .train(false)
+        .train()
         .unwrap_or_else(|e| eprintln_error(e));
 
     println!("{}", model);
 
-    model.save("models/example.bin").unwrap_or_else(|e| eprintln_error(e));
+    model.save().unwrap_or_else(|e| eprintln_error(e));
     let loaded_model = tokenizer::Tokenizer::load("models/example.bin").unwrap_or_else(|e| eprintln_error(e));
     assert_eq!(model, loaded_model);
 
