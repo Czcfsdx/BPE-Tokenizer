@@ -483,12 +483,12 @@ mod tests {
 
     #[test]
     fn test_create() {
-        const MAX_VOCABULARY_SIZE: usize = 100000;
+        const MAX_VOCABULARY_SIZE: usize = 200;
         const TRAIN_CROPS_PATH: &str = "tests/bpe-wiki.txt";
         const SPECIAL_TOKENS: [&str; 3] = ["<|beginoftext|>", "<|middleoftext|>", "<|endoftext|>"];
         const PATTERN: &str =
             r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
-        const CONFIG_PATH: &str = "examples/example.conf";
+        const CONFIG_PATH: &str = "tests/test.conf";
         let model = Tokenizer::new(CONFIG_PATH).expect("Failed to create tokenizer");
         assert_eq!(model.config.pre_tokenizer_pattern, PATTERN);
         assert_eq!(model.config.max_vocabulary_size, MAX_VOCABULARY_SIZE);
