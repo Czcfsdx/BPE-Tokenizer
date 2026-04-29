@@ -9,6 +9,8 @@ fn main() {
         .train(false)
         .unwrap_or_else(|e| eprintln_error(e));
 
+    println!("{}", model);
+
     model.save("models/example.bin").unwrap_or_else(|e| eprintln_error(e));
     let loaded_model = tokenizer::Tokenizer::load("models/example.bin").unwrap_or_else(|e| eprintln_error(e));
     assert_eq!(model, loaded_model);

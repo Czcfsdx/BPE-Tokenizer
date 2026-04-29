@@ -17,7 +17,7 @@ pub struct Pair(Token, Token);
 
 impl fmt::Display for Pair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "({:>3}, {:>3})", self.0, self.1)
+        write!(f, "({}, {})", self.0, self.1)
     }
 }
 
@@ -72,7 +72,7 @@ impl Tokenizer {
         for index in 1..=self.config.max_vocabulary_size {
             let Some((pair, times)) = Self::find_most_frequent_pair(&corpus_tokens, None) else {
                 if verbose {
-                    println!("New token not found");
+                    println!("New token not found. Stop training.");
                 }
                 break;
             };
@@ -80,7 +80,7 @@ impl Tokenizer {
             // If no token appears more than once, stop merging token in new token.
             if times <= 1 {
                 if verbose {
-                    println!("New token not found");
+                    println!("New token not found. Stop training.");
                 }
                 break;
             }
@@ -96,12 +96,12 @@ impl Tokenizer {
                 let token_bytes = self.decode_token_to_bytes(new_token);
                 match String::from_utf8(token_bytes) {
                     Ok(token_str) => println!(
-                        "New token {:>3} ({:>2} times) => {}: ({:?})",
+                        "New token {} ({} times) => {}: ({:?})",
                         new_token, times, pair, token_str
                     ),
                     // Don't return this error, handle the error on-site.
                     Err(error) => println!(
-                        "New token {:>3} ({:>2} times) => {} But error occurs when converting it to String: {}",
+                        "New token {} ({} times) => {} But error occurs when converting it to String: {}",
                         new_token, times, pair, error
                     ),
                 }
@@ -200,28 +200,29 @@ impl Tokenizer {
         })?;
         Ok(())
     }
+}
 
-    // render the vocabulary as a String.
-    // TODO: display trait?
-    pub fn vocabulary_to_text(&self) -> String {
-        let mut result = String::new();
+impl fmt::Display for Tokenizer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (token, pair) in self.vocabulary.iter().enumerate() {
             if token <= u8::MAX as Token {
                 continue;
             }
             let temp = match String::from_utf8(self.decode_token_to_bytes(token)) {
-                Ok(token_str) => {
-                    format!("Token {:>3} => {}: ({:?})\n", token, pair, token_str)
-                }
+                Ok(token_str) => format!("Token {} => {}: {:?}", token, pair, token_str),
                 // Don't return this error, handle the error on-site.
                 Err(error) => format!(
-                    "Token {:>3} => {} But error occurs when converting it to String: {}\n",
+                    "Token {} => {} But error occurs when converting it to String: {}",
                     token, pair, error
                 ),
             };
-            result.push_str(&temp);
+            writeln!(f, "{}", temp)?
         }
-        result
+        for (token, str) in self.config.special_tokens.iter().enumerate() {
+            let min_special_token = self.config.max_vocabulary_size + (u8::MAX as usize) + 1;
+            writeln!(f, "Special Token {} => {:?}", token + min_special_token, str)?
+        }
+        Ok(())
     }
 }
 
