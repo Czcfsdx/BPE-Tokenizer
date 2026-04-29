@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use rkyv::{Archive, Deserialize, Serialize};
 use fancy_regex::Regex;
+use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
@@ -69,7 +69,7 @@ impl Tokenizer {
             .map(|s| s.bytes().map(|b| b as Token).collect::<Vec<Token>>())
             .collect();
 
-        while (self.vocabulary.len() - u8::MAX as usize) < self.config.max_vocabulary_size {
+        for index in 1..=self.config.max_vocabulary_size {
             let Some((pair, times)) = Self::find_most_frequent_pair(&corpus_tokens, None) else {
                 if verbose {
                     println!("New token not found");
@@ -85,7 +85,7 @@ impl Tokenizer {
                 break;
             }
 
-            let new_token = self.vocabulary.len();
+            let new_token = index + u8::MAX as usize;
             corpus_tokens = corpus_tokens
                 .into_iter()
                 .map(|v| Self::replace_pair_to_token(v, pair, new_token))
@@ -156,13 +156,10 @@ impl Tokenizer {
 
             for (i, &token) in tokens.iter().enumerate() {
                 // whether the token is a special token
-                if token >= self.config.max_vocabulary_size {
+                let min_special_token = self.config.max_vocabulary_size + (u8::MAX as usize) + 1;
+                if token >= min_special_token {
                     result.push_str(&self.decode_ordinary(&tokens[last_special..i])?);
-                    if let Some(str) = self
-                        .config
-                        .special_tokens
-                        .get(token - self.config.max_vocabulary_size)
-                    {
+                    if let Some(str) = self.config.special_tokens.get(token - min_special_token) {
                         result.push_str(str);
                     }
                     last_special = i + 1;
@@ -319,11 +316,12 @@ impl Tokenizer {
             vocabulary.push(Pair(i as usize, 0));
         }
 
+        let min_special_token = config.max_vocabulary_size + (u8::MAX as usize) + 1;
         let inverse_special_tokens = config
             .special_tokens
             .iter()
             .enumerate()
-            .map(|(i, s)| (s.clone(), i + config.max_vocabulary_size))
+            .map(|(i, s)| (s.clone(), i + min_special_token))
             .collect();
 
         Ok(Self {
@@ -346,11 +344,12 @@ impl Tokenizer {
             special_tokens: data.special_tokens,
             train_path: data.train_path,
         };
+        let min_special_token = data.max_vocabulary_size + (u8::MAX as usize) + 1;
         let inverse_special_tokens = config
             .special_tokens
             .iter()
             .enumerate()
-            .map(|(i, s)| (s.clone(), i + data.max_vocabulary_size))
+            .map(|(i, s)| (s.clone(), i + min_special_token))
             .collect();
         Ok(Self {
             config,
