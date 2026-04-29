@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
 use rkyv::{Archive, Deserialize, Serialize};
+use fancy_regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-
-type Token = usize;
+use std::fs;
+use std::io::{BufRead, BufReader};
 
 // Pattern from: https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
 const DEFAULT_PATTERN: &str =
     r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
+
+type Token = usize;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash, Archive, Deserialize, Serialize)]
 pub struct Pair(Token, Token);
@@ -50,9 +53,9 @@ struct TokenizerConfig {
 impl Tokenizer {
     pub fn train(&mut self, verbose: bool) -> Result<()> {
         // Pre-tokenize
-        let regex = fancy_regex::Regex::new(&self.config.pre_tokenizer_pattern)?;
+        let regex = Regex::new(&self.config.pre_tokenizer_pattern)?;
         // TODO: Don't read all content in once.
-        let file_content = std::fs::read_to_string(&self.config.train_path)
+        let file_content = fs::read_to_string(&self.config.train_path)
             .with_context(|| format!("Failed to read from the file: {}", self.config.train_path))?;
         // TODO: Maybe we can use HashMap<&str, usize> to store the corpus and save more space
         let corpus: Vec<&str> = regex
@@ -117,7 +120,7 @@ impl Tokenizer {
                 .map(|s| fancy_regex::escape(s).into_owned())
                 .collect::<Vec<String>>()
                 .join("|");
-            let special_regex = fancy_regex::Regex::new(&special_pattern)
+            let special_regex = Regex::new(&special_pattern)
                 .with_context(|| "Fail to turn special_tokens into regex expression")?;
 
             let mut result: Vec<Token> = Vec::new();
@@ -177,9 +180,6 @@ impl Tokenizer {
 
     // dump the tokenizer into a file in the given path.
     pub fn save(&self, path: &str) -> Result<()> {
-        use std::fs::{create_dir_all, write};
-        use std::path::Path;
-
         let data = TokenizerData {
             max_vocabulary_size: self.config.max_vocabulary_size,
             pre_tokenizer_pattern: self.config.pre_tokenizer_pattern.clone(),
@@ -191,11 +191,11 @@ impl Tokenizer {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data)
             .with_context(|| "Fail to serialize the tokenizer model")?;
 
-        if let Some(parent) = Path::new(path).parent() {
-            create_dir_all(parent)?;
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            fs::create_dir_all(parent)?;
         }
 
-        write(path, &bytes).with_context(|| {
+        fs::write(path, &bytes).with_context(|| {
             format!(
                 "Fail to write the binary serialization of the tokenizer model to the file: {}",
                 path,
@@ -233,7 +233,7 @@ impl Tokenizer {
     // encode a string that ignores any special tokens.
     fn encode_ordinary(&self, text: &str) -> Result<Vec<Token>> {
         // Pre-tokenize
-        let regex = fancy_regex::Regex::new(&self.config.pre_tokenizer_pattern)?;
+        let regex = Regex::new(&self.config.pre_tokenizer_pattern)?;
         let chunks: Vec<&str> = regex
             .find_iter(text)
             .filter_map(|m| m.ok())
@@ -337,7 +337,7 @@ impl Tokenizer {
     // load the tokenizer form a file in the given path.
     pub fn load(path: &str) -> Result<Self> {
         let bytes =
-            std::fs::read(path).with_context(|| format!("Fail to read from the file: {}", path))?;
+            fs::read(path).with_context(|| format!("Fail to read from the file: {}", path))?;
         let data = rkyv::from_bytes::<TokenizerData, rkyv::rancor::Error>(&bytes)
             .with_context(|| format!("Fail to deserialize the data from the file: {}", path))?;
         let config = TokenizerConfig {
@@ -410,9 +410,7 @@ impl TokenizerConfig {
         let mut pre_tokenizer_pattern: Option<String> = None;
         let mut special_tokens: Option<Vec<String>> = None;
 
-        use std::fs::File;
-        use std::io::{BufRead, BufReader};
-        let file = File::open(path)
+        let file = fs::File::open(path)
             .with_context(|| format!("Fail to read from the configuration file: {}", path))?;
         let file = BufReader::new(file);
         for line in file.lines() {
@@ -478,11 +476,8 @@ mod tests {
 
     fn create_test_tokenizer() -> Tokenizer {
         const CONFIG_PATH: &str = "examples/example.conf";
-        let mut model = Tokenizer::new(CONFIG_PATH)
-            .expect("Failed to create tokenizer");
-        model
-            .train(false)
-            .expect("Failed to train tokenizer");
+        let mut model = Tokenizer::new(CONFIG_PATH).expect("Failed to create tokenizer");
+        model.train(false).expect("Failed to train tokenizer");
         model
     }
 
@@ -492,10 +487,9 @@ mod tests {
         const TRAIN_CROPS_PATH: &str = "tests/bpe-wiki.txt";
         const SPECIAL_TOKENS: [&str; 3] = ["<|beginoftext|>", "<|middleoftext|>", "<|endoftext|>"];
         const PATTERN: &str =
-    r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
+            r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
         const CONFIG_PATH: &str = "examples/example.conf";
-        let model = Tokenizer::new(CONFIG_PATH)
-            .expect("Failed to create tokenizer");
+        let model = Tokenizer::new(CONFIG_PATH).expect("Failed to create tokenizer");
         assert_eq!(model.config.pre_tokenizer_pattern, PATTERN);
         assert_eq!(model.config.max_vocabulary_size, MAX_VOCABULARY_SIZE);
         assert_eq!(model.config.special_tokens, SPECIAL_TOKENS);
