@@ -222,8 +222,12 @@ impl fmt::Display for Tokenizer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (token, pair) in self.vocabulary.iter().enumerate() {
             if token <= u8::MAX as Token {
+                if f.alternate() {
+                    writeln!(f, "Token {} => {}: {:?}", token, pair, token as u8 as char)?
+                }
                 continue;
             }
+
             let temp = match String::from_utf8(self.decode_token_to_bytes(token)) {
                 Ok(token_str) => format!("Token {} => {}: {:?}", token, pair, token_str),
                 // Don't return this error, handle the error on-site.
@@ -234,14 +238,17 @@ impl fmt::Display for Tokenizer {
             };
             writeln!(f, "{}", temp)?
         }
-        for (token, str) in self.config.special_tokens.iter().enumerate() {
-            let min_special_token = self.config.max_vocabulary_size + (u8::MAX as usize) + 1;
-            writeln!(
-                f,
-                "Special Token {} => {:?}",
-                token + min_special_token,
-                str
-            )?
+
+        if f.alternate() {
+            for (token, str) in self.config.special_tokens.iter().enumerate() {
+                let min_special_token = self.config.max_vocabulary_size + (u8::MAX as usize) + 1;
+                writeln!(
+                    f,
+                    "Special Token {} => {:?}",
+                    token + min_special_token,
+                    str
+                )?
+            }
         }
         Ok(())
     }
