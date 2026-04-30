@@ -5,55 +5,27 @@ A tokenizer implementation based on the [BPE](https://en.wikipedia.org/wiki/Byte
 > [!WARNING]
 > This is a practice project intended to help understand how BPE algorithms and tokenizers work. It is not a production-ready implementation. Some performance optimizations and edge case handling may not be fully polished.
 
-It supports following features:
+## Example
 
-- **BPE Training**: Train vocabulary and merge rules from text
-- **Encode/Decode**: Convert between text and token sequences
-- **Special Tokens**: Support custom special tokens
-- **Pre-tokenization**: Use regex pattern pre-tokenization
-- **Model Persistence**: Save and load tokenizer models (using rkyv serialization)
+```bash
+# Train model based on the configuration file
+./BPE train examples/example.conf
 
-## Quick Example
+# Encode text into tokens
+./BPE encode --model models/example.bin --text "Hello, World!"
 
-```rust
-use tokenizer::Tokenizer;
-
-fn main() -> anyhow::Result<()> {
-    // Create tokenizer with vocabulary size 100000, 2 special tokens
-    let mut model = Tokenizer::new("examples/example.conf")?;
-
-    // Train
-    model.train(false)?;
-
-    // Encode
-    let tokens = model.encode("Hello, World")?;
-    println!("{:?}", tokens);
-
-    // Decode
-    let text = model.decode(&tokens)?;
-    println!("{}", text);
-
-    // Save model
-    model.save("models/my_tokenizer.bin")?;
-
-    // Load model
-    let loaded = Tokenizer::load("models/my_tokenizer.bin")?;
-
-    Ok(())
-}
+# Show the vocabulary in the tokenizer pmodel
+./BPE show models/example.bin
 ```
 
-## Build & Run
+## Build
 
-The project depends on:
-- fancy-regex: Regex support
-- rkyv: Serialization/deserialization
+This project depends on:
 - anyhow: Error handling
+- clap: CLI argument parser
+- fancy-regex: Regex support
 
 ```bash
 # Build
 cargo build
-
-# Run example
-cargo run
 ```
