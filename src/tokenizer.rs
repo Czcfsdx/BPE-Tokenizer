@@ -41,13 +41,13 @@ struct TokenizerData {
 
 // for configuration parse
 #[derive(PartialEq, Eq, Debug)]
-struct TokenizerConfig {
+pub struct TokenizerConfig {
     max_vocabulary_size: usize,
     pre_tokenizer_pattern: String,
     special_tokens: Vec<String>,
-    train_path: Option<String>,
-    verbose: bool,
-    save_path: Option<String>,
+    pub train_path: Option<String>,
+    pub verbose: bool,
+    pub save_path: Option<String>,
 }
 
 // Public Method
@@ -336,9 +336,7 @@ impl Tokenizer {
 
 // Associated Function
 impl Tokenizer {
-    pub fn new(config_file: &str) -> Result<Self> {
-        let config = TokenizerConfig::parse_config_file(config_file)?;
-
+    pub fn new(config: TokenizerConfig) -> Result<Self> {
         // Initial the vocabulary to:
         // 0 => { left: 0, right: 0}
         // 1 => { left: 1, right: 0}
@@ -438,6 +436,40 @@ impl Tokenizer {
 }
 
 impl TokenizerConfig {
+    // Create TokenizerConfig by merging Config parse
+    // from a configuration file with arguments passing.
+    pub fn new(
+        path: &str,
+        train_path: Option<String>,
+        verbose: bool,
+        save_path: Option<String>,
+    ) -> Result<Self> {
+        // merge argument and configuration
+        let mut config = Self::parse_config_file(path)?;
+        config.verbose = config.verbose || verbose;
+        if train_path.is_some() {
+            config.train_path = train_path;
+        }
+        if save_path.is_some() {
+            config.save_path = save_path;
+        }
+
+        // check train_path and save_path
+        if config.train_path.is_none() {
+            bail!(
+                "Fail to found train_path.\nPlease specify by --train-path or check your configuration file: {path}"
+            )
+        }
+        if config.save_path.is_none() {
+            bail!(
+                "Fail to found save_path.\nPlease specify by --save-path or check your configuration file: {path}"
+            )
+        }
+
+        Ok(config)
+    }
+
+    // Parse TokenizerConfig from a configuration file.
     fn parse_config_file(path: &str) -> Result<Self> {
         let mut max_vocabulary_size: Option<usize> = None;
         let mut pre_tokenizer_pattern: Option<String> = None;
@@ -499,21 +531,15 @@ impl TokenizerConfig {
         let max_vocabulary_size = max_vocabulary_size.ok_or(anyhow!(
             "Fail to found max_vocabulary_size.\nPlease check your configuration file: {path}"
         ))?;
-        let train_path = train_path.ok_or(anyhow!(
-            "Fail to found train_path.\nPlease check your configuration file: {path}"
-        ))?;
-        let save_path = save_path.ok_or(anyhow!(
-            "Fail to found save_path.\nPlease check your configuration file: {path}"
-        ))?;
         let special_tokens = special_tokens.unwrap_or_default();
         let pre_tokenizer_pattern = pre_tokenizer_pattern.unwrap_or(DEFAULT_PATTERN.to_string());
         Ok(TokenizerConfig {
             max_vocabulary_size,
             pre_tokenizer_pattern,
             special_tokens,
-            train_path: Some(train_path),
+            train_path,
             verbose,
-            save_path: Some(save_path),
+            save_path,
         })
     }
 }
@@ -524,7 +550,9 @@ mod tests {
 
     fn create_test_tokenizer() -> Tokenizer {
         const CONFIG_PATH: &str = "tests/test.conf";
-        let mut model = Tokenizer::new(CONFIG_PATH).expect("Failed to create tokenizer");
+        let config = TokenizerConfig::new(CONFIG_PATH, None, false, None)
+            .expect("Fail to parse configuration file");
+        let mut model = Tokenizer::new(config).expect("Failed to create tokenizer");
         model.train().expect("Failed to train tokenizer");
         model
     }
@@ -539,7 +567,9 @@ mod tests {
         const VERBOSE: bool = true;
         const SAVE_PATH: &str = "tests/test.bin";
         const CONFIG_PATH: &str = "tests/test.conf";
-        let model = Tokenizer::new(CONFIG_PATH).expect("Failed to create tokenizer");
+        let config = TokenizerConfig::new(CONFIG_PATH, None, false, None)
+            .expect("Fail to parse configuration file");
+        let model = Tokenizer::new(config).expect("Failed to create tokenizer");
         assert_eq!(model.config.pre_tokenizer_pattern, PATTERN);
         assert_eq!(model.config.max_vocabulary_size, MAX_VOCABULARY_SIZE);
         assert_eq!(model.config.special_tokens, SPECIAL_TOKENS);

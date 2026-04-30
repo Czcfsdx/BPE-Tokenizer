@@ -1,6 +1,7 @@
 mod tokenizer;
 
 use clap::{Args, Parser, Subcommand};
+use tokenizer::{Tokenizer, TokenizerConfig};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -24,6 +25,15 @@ struct TrainArg {
     /// Path to Configuration file of the tokenizer model to train
     #[arg(value_name = "FILE")]
     config: String,
+    /// The corpus path for the tokenizer model to train (Override configuration)
+    #[arg(short, long)]
+    train_path: Option<String>,
+    /// Show information verbosely in training (Override configuration)
+    #[arg(short, long)]
+    verbose: bool,
+    /// The path where the tokenizer model is saved after training (Override configuration)
+    #[arg(short, long)]
+    save_path: Option<String>,
 }
 
 #[derive(Args)]
@@ -62,19 +72,19 @@ fn main() {
 }
 
 fn train(arg: TrainArg) {
-    let mut model = tokenizer::Tokenizer::new(&arg.config).unwrap_or_else(|e| eprintln_error(e));
+    let config = TokenizerConfig::new(&arg.config, arg.train_path, arg.verbose, arg.save_path).unwrap_or_else(|e| eprintln_error(e));
+    let mut model = Tokenizer::new(config).unwrap_or_else(|e| eprintln_error(e));
     model.train().unwrap_or_else(|e| eprintln_error(e));
     model.save().unwrap_or_else(|e| eprintln_error(e));
 }
 
 fn encode(arg: EncodeArg) {
-    let model = tokenizer::Tokenizer::load(&arg.model).unwrap_or_else(|e| eprintln_error(e));
+    let model = Tokenizer::load(&arg.model).unwrap_or_else(|e| eprintln_error(e));
     let tokens = model
         .encode(&arg.text)
         .unwrap_or_else(|e| eprintln_error(e));
     if arg.no_decode {
         println!("{:?}", tokens);
-        return;
     } else if arg.show_id {
         let result = tokens
             .iter()
@@ -96,7 +106,7 @@ fn encode(arg: EncodeArg) {
 }
 
 fn show(arg: ShowArg) {
-    let model = tokenizer::Tokenizer::load(&arg.model).unwrap_or_else(|e| eprintln_error(e));
+    let model = Tokenizer::load(&arg.model).unwrap_or_else(|e| eprintln_error(e));
     println!("The vocabulary in {}:", &arg.model);
     if arg.all_tokens {
         print!("{:#}", model);
