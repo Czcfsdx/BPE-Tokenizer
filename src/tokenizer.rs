@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use fancy_regex::Regex;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
@@ -27,6 +28,7 @@ pub struct Tokenizer {
     vocabulary: Vec<Pair>,        // for decode
     merges: HashMap<Pair, Token>, // for encode
     inverse_special_tokens: HashMap<String, Token>,
+    decode_cache: RefCell<HashMap<Token, Vec<u8>>>, // Not support for multiple threads
 }
 
 // for `save` and `load`
@@ -60,12 +62,12 @@ impl Tokenizer {
         }
         let regex = Regex::new(pattern)?;
 
-        // TODO: Don't read all content in once.
         let Some(path) = self.config.train_path.as_deref() else {
             bail!(
                 "Fail to found train_path in training! Maybe because you want to retrain a model which is loaded from a binary serialization."
             )
         };
+        // TODO: Don't read all content in once.
         let file_content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read from the file: {}", path))?;
         // TODO: Maybe we can use HashMap<&str, usize> to store the corpus and save more space
@@ -105,8 +107,7 @@ impl Tokenizer {
             self.vocabulary.push(pair);
             self.merges.insert(pair, new_token);
             if verbose {
-                let token_bytes = self.decode_token_to_bytes(new_token);
-                match String::from_utf8(token_bytes) {
+                match self.decode(&[new_token]) {
                     Ok(token_str) => println!(
                         "New token {} ({} times) => {}: ({:?})",
                         new_token, times, pair, token_str
@@ -165,10 +166,10 @@ impl Tokenizer {
         if !self.config.special_tokens.is_empty() {
             let mut result: String = String::new();
             let mut last_special = 0;
+            let min_special_token = self.config.max_vocabulary_size + (u8::MAX as usize) + 1;
 
             for (i, &token) in tokens.iter().enumerate() {
                 // whether the token is a special token
-                let min_special_token = self.config.max_vocabulary_size + (u8::MAX as usize) + 1;
                 if token >= min_special_token {
                     result.push_str(&self.decode_ordinary(&tokens[last_special..i])?);
                     if let Some(str) = self.config.special_tokens.get(token - min_special_token) {
@@ -228,7 +229,7 @@ impl fmt::Display for Tokenizer {
                 continue;
             }
 
-            let temp = match String::from_utf8(self.decode_token_to_bytes(token)) {
+            let temp = match self.decode(&[token]) {
                 Ok(token_str) => format!("Token {} => {}: {:?}", token, pair, token_str),
                 // Don't return this error, handle the error on-site.
                 Err(error) => format!(
@@ -313,8 +314,12 @@ impl Tokenizer {
     }
 
     // decode a token to a byte sequence
-    // PERF: Implement some kind of cache to not decode the same token over and over again.
     fn decode_token_to_bytes(&self, token: Token) -> Vec<u8> {
+        // Cache
+        if let Some(cached_bytes) = self.decode_cache.borrow().get(&token) {
+            return cached_bytes.clone();
+        }
+
         let mut bytes: Vec<u8> = vec![];
         let Pair(left, right) = self.vocabulary[token];
         if token == left {
@@ -330,6 +335,7 @@ impl Tokenizer {
             bytes.append(&mut left_bytes);
             bytes.append(&mut right_bytes);
         }
+        self.decode_cache.borrow_mut().insert(token, bytes.clone());
         bytes
     }
 }
@@ -360,6 +366,7 @@ impl Tokenizer {
             vocabulary,
             merges: HashMap::new(),
             inverse_special_tokens,
+            decode_cache: RefCell::new(HashMap::new()),
         })
     }
 
@@ -389,6 +396,7 @@ impl Tokenizer {
             vocabulary: data.vocabulary,
             merges: data.merges_vec.into_iter().collect(),
             inverse_special_tokens,
+            decode_cache: RefCell::new(HashMap::new()),
         })
     }
 
