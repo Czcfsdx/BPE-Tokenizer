@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use fancy_regex::Regex;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use std::fmt;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -10,6 +10,10 @@ use std::io::{BufRead, BufReader};
 // Pattern from: https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
 const DEFAULT_PATTERN: &str =
     r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
+
+// TODO: Only use for debug or add to configuration.
+const INTERVAL: usize = 100;
+const JOBS: usize = 1;
 
 type Token = usize;
 
@@ -83,8 +87,10 @@ impl Tokenizer {
             .collect();
 
         let verbose = self.config.verbose;
+        let train_timer = std::time::Instant::now();
+        println!("Start training...");
         for index in 1..=self.config.max_vocabulary_size {
-            let Some((pair, times)) = Self::find_most_frequent_pair(&corpus_tokens, None) else {
+            let Some((pair, times)) = Self::find_most_frequent_pair(&corpus_tokens) else {
                 if verbose {
                     println!("New token not found. Stop training.");
                 }
@@ -119,7 +125,14 @@ impl Tokenizer {
                     ),
                 }
             }
+
+            if index % INTERVAL == 0 {
+                println!("Episode {index}");
+                println!("  used time: {}s", train_timer.elapsed().as_secs_f64());
+                println!("  vocabulary size: {}", u8::MAX as usize + index);
+            }
         }
+        println!("End training. Time Used: {}s", train_timer.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -401,21 +414,17 @@ impl Tokenizer {
     }
 
     // Find the token pair that appears most frequently in the given tokens sequence
-    // If the exclude_set is not None, it will also filter all tokens in the exclude_set
     // WARN: Because HashMap does not maintain any order of the key-value pairs,
     // if there are multiple token pairs that occur the most frequently,
     // we can't assure that the same token will be selected each time.
     fn find_most_frequent_pair(
         tokens: &[Vec<Token>],
-        exclude_set: Option<&HashSet<Pair>>,
     ) -> Option<(Pair, usize)> {
         let mut freq_table: HashMap<Pair, usize> = HashMap::new();
         for text in tokens {
             for w in text.windows(2) {
                 let pair = Pair(w[0], w[1]);
-                if exclude_set.is_none_or(|set| !set.contains(&pair)) {
-                    freq_table.entry(pair).and_modify(|v| *v += 1).or_insert(1);
-                }
+                freq_table.entry(pair).and_modify(|v| *v += 1).or_insert(1);
             }
         }
 
