@@ -2,16 +2,17 @@ use anyhow::{Context, Result, anyhow, bail};
 use fancy_regex::Regex;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::thread;
 
 // Pattern from: https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
 const DEFAULT_PATTERN: &str =
     r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
 
-// TODO: Only use for debug or add to configuration.
+// TODO: Only use for debug or add to configuration and argument.
 const INTERVAL: usize = 100;
 const JOBS: usize = 1;
 
@@ -74,23 +75,27 @@ impl Tokenizer {
         // TODO: Don't read all content in once.
         let file_content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read from the file: {}", path))?;
-        // TODO: Maybe we can use HashMap<&str, usize> to store the corpus and save more space
+
         let corpus: Vec<&str> = regex
             .find_iter(&file_content)
             .filter_map(|m| m.ok())
             .map(|m| m.as_str())
             .collect();
 
-        let mut corpus_tokens: Vec<Vec<Token>> = corpus
-            .iter()
-            .map(|s| s.bytes().map(|b| b as Token).collect::<Vec<Token>>())
-            .collect();
+        let mut corpus_tokens = HashMap::new();
+        for str in corpus {
+            let tokens = str.bytes().map(|b| b as Token).collect::<Vec<Token>>();
+            corpus_tokens
+                .entry(tokens)
+                .and_modify(|v| *v += 1)
+                .or_insert(1);
+        }
 
         let verbose = self.config.verbose;
         let train_timer = std::time::Instant::now();
         println!("Start training...");
         for index in 1..=self.config.max_vocabulary_size {
-            let Some((pair, times)) = Self::find_most_frequent_pair(&corpus_tokens) else {
+            let Some((pair, times)) = Self::find_most_frequent_pair(&corpus_tokens)? else {
                 if verbose {
                     println!("New token not found. Stop training.");
                 }
@@ -106,10 +111,7 @@ impl Tokenizer {
             }
 
             let new_token = index + u8::MAX as usize;
-            corpus_tokens = corpus_tokens
-                .into_iter()
-                .map(|v| Self::replace_pair_to_token(v, pair, new_token))
-                .collect();
+            corpus_tokens = Self::replace_pair_to_token(corpus_tokens, pair, new_token)?;
             self.vocabulary.push(pair);
             self.merges.insert(pair, new_token);
             if verbose {
@@ -128,11 +130,13 @@ impl Tokenizer {
 
             if index % INTERVAL == 0 {
                 println!("Episode {index}");
-                println!("  used time: {}s", train_timer.elapsed().as_secs_f64());
+                println!("  time used: {}s", train_timer.elapsed().as_secs_f64());
                 println!("  vocabulary size: {}", u8::MAX as usize + index);
             }
         }
-        println!("End training. Time Used: {}s", train_timer.elapsed().as_secs_f64());
+        println!("End training.");
+        println!("  time used: {}s", train_timer.elapsed().as_secs_f64());
+        println!("  vocabulary size: {}", self.vocabulary.len());
         Ok(())
     }
 
@@ -415,40 +419,114 @@ impl Tokenizer {
 
     // Find the token pair that appears most frequently in the given tokens sequence
     // WARN: Because HashMap does not maintain any order of the key-value pairs,
-    // if there are multiple token pairs that occur the most frequently,
+    // if there are multiple token pairs that occur the same times,
     // we can't assure that the same token will be selected each time.
     fn find_most_frequent_pair(
-        tokens: &[Vec<Token>],
-    ) -> Option<(Pair, usize)> {
+        corpus: &HashMap<Vec<Token>, usize>,
+    ) -> Result<Option<(Pair, usize)>> {
+        // To use chunk(), we need to transform HashMap to Vec
+        let vec: Vec<(Vec<Token>, usize)> = corpus
+            .iter()
+            .map(|(tokens, value)| (tokens.clone(), *value))
+            .collect();
+        let chunk_size = corpus.len().div_ceil(JOBS);
+        let chunks: Vec<_> = vec.chunks(chunk_size).collect();
+
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                let chunk = chunk.to_vec();
+                thread::spawn(move || {
+                    let mut local_freq_table = HashMap::new();
+                    for (token, count) in chunk {
+                        for w in token.windows(2) {
+                            let pair = Pair(w[0], w[1]);
+                            local_freq_table
+                                .entry(pair)
+                                .and_modify(|v| *v += count)
+                                .or_insert(count);
+                        }
+                    }
+                    local_freq_table
+                })
+            })
+            .collect();
+
         let mut freq_table: HashMap<Pair, usize> = HashMap::new();
-        for text in tokens {
-            for w in text.windows(2) {
-                let pair = Pair(w[0], w[1]);
-                freq_table.entry(pair).and_modify(|v| *v += 1).or_insert(1);
+        for (i, h) in handles.into_iter().enumerate() {
+            match h.join() {
+                Ok(local_map) => {
+                    for (pair, count) in local_map {
+                        freq_table
+                            .entry(pair)
+                            .and_modify(|v| *v += count)
+                            .or_insert(count);
+                    }
+                }
+                Err(e) => bail!("Thread {i} panicked when counting pair frequency: {e:?}"),
             }
         }
 
-        freq_table
+        Ok(freq_table
             .iter()
-            .max_by_key(|kv| kv.1)
-            .map(|(token, times)| (*token, *times))
+            .max_by_key(|&(_, value)| value)
+            .map(|(token, times)| (*token, *times)))
     }
 
-    // Replace every form_pair in tokens to to_token
-    fn replace_pair_to_token(tokens: Vec<Token>, from_pair: Pair, to_token: Token) -> Vec<Token> {
-        let mut new_tokens = Vec::with_capacity(tokens.len());
-        let mut i: usize = 0;
-        while i < tokens.len() {
-            if i + 1 < tokens.len() && Pair(tokens[i], tokens[i + 1]) == from_pair {
-                new_tokens.push(to_token);
-                i += 2;
-            } else {
-                new_tokens.push(tokens[i]);
-                i += 1;
+    // Replace form_pair in every token in corpus to to_token
+    fn replace_pair_to_token(
+        corpus: HashMap<Vec<Token>, usize>,
+        from_pair: Pair,
+        to_token: Token,
+    ) -> Result<HashMap<Vec<Token>, usize>> {
+        let length = corpus.len();
+        // To use chunk(), we need to transform HashMap to Vec
+        let vec: Vec<(Vec<Token>, usize)> = corpus.into_iter().collect();
+        let chunk_size = length.div_ceil(JOBS);
+        let chunks: Vec<_> = vec.chunks(chunk_size).collect();
+
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                let chunk = chunk.to_vec();
+                thread::spawn(move || {
+                    let mut local_map = HashMap::with_capacity(chunk.len());
+                    for (tokens, value) in chunk {
+                        let mut new_tokens = Vec::with_capacity(tokens.len());
+                        let mut i: usize = 0;
+                        while i < tokens.len() {
+                            if i + 1 < tokens.len() && Pair(tokens[i], tokens[i + 1]) == from_pair {
+                                new_tokens.push(to_token);
+                                i += 2;
+                            } else {
+                                new_tokens.push(tokens[i]);
+                                i += 1;
+                            }
+                        }
+                        new_tokens.shrink_to_fit();
+                        local_map.insert(new_tokens, value);
+                    }
+                    local_map.shrink_to_fit();
+                    local_map
+                })
+            })
+            .collect();
+
+        let mut new_corpus = HashMap::with_capacity(length);
+        for (i, h) in handles.into_iter().enumerate() {
+            match h.join() {
+                Ok(local_map) => {
+                    for (tokens, value) in local_map {
+                        new_corpus
+                            .entry(tokens)
+                            .and_modify(|v| *v += value)
+                            .or_insert(value);
+                    }
+                }
+                Err(e) => bail!("Thread {i} panicked when counting pair frequency: {e:?}"),
             }
         }
-        new_tokens.shrink_to_fit();
-        new_tokens
+        Ok(new_corpus)
     }
 }
 
