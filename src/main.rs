@@ -1,5 +1,7 @@
 mod tokenizer;
 
+use std::num::NonZero;
+
 use clap::{Args, Parser, Subcommand};
 use tokenizer::{Tokenizer, TokenizerConfig};
 
@@ -34,6 +36,12 @@ struct TrainArg {
     /// The path where the tokenizer model is saved after training (Override configuration)
     #[arg(short, long)]
     save_path: Option<String>,
+    /// The episode interval for reporting in training (Override configuration)
+    #[arg(short, long)]
+    interval: Option<NonZero<usize>>,
+    /// the number of paraller threads (Override configuration)
+    #[arg(short, long)]
+    jobs: Option<NonZero<usize>>,
 }
 
 #[derive(Args)]
@@ -72,7 +80,15 @@ fn main() {
 }
 
 fn train(arg: TrainArg) {
-    let config = TokenizerConfig::new(&arg.config, arg.train_path, arg.verbose, arg.save_path).unwrap_or_else(|e| eprintln_error(e));
+    let config = TokenizerConfig::new(
+        &arg.config,
+        arg.train_path,
+        arg.verbose,
+        arg.save_path,
+        arg.interval,
+        arg.jobs,
+    )
+    .unwrap_or_else(|e| eprintln_error(e));
     let mut model = Tokenizer::new(config).unwrap_or_else(|e| eprintln_error(e));
     model.train().unwrap_or_else(|e| eprintln_error(e));
     model.save().unwrap_or_else(|e| eprintln_error(e));

@@ -6,15 +6,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::num::NonZero;
 use std::thread;
 
 // Pattern from: https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
 const DEFAULT_PATTERN: &str =
     r"'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s";
-
-// TODO: Only use for debug or add to configuration and argument.
-const INTERVAL: usize = 100;
-const JOBS: usize = 1;
 
 type Token = usize;
 
@@ -55,6 +52,8 @@ pub struct TokenizerConfig {
     pub train_path: Option<String>,
     pub verbose: bool,
     pub save_path: Option<String>,
+    pub num_threads: NonZero<usize>,
+    pub interval: Option<NonZero<usize>>,
 }
 
 // Public Method
@@ -72,7 +71,7 @@ impl Tokenizer {
         };
         // TODO: Don't read all content in once.
         let file_content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read from the file: {}", path))?;
+            .with_context(|| format!("Fail to read from the file: {}", path))?;
 
         let corpus: Vec<&str> = regex
             .find_iter(&file_content)
@@ -93,7 +92,9 @@ impl Tokenizer {
         let train_timer = std::time::Instant::now();
         println!("Start training...");
         for index in 1..=self.config.max_vocabulary_size {
-            let Some((pair, times)) = Self::find_most_frequent_pair(&corpus_tokens)? else {
+            let Some((pair, times)) =
+                Self::find_most_frequent_pair(&corpus_tokens, self.config.num_threads)?
+            else {
                 if verbose {
                     println!("New token not found. Stop training.");
                 }
@@ -109,7 +110,12 @@ impl Tokenizer {
             }
 
             let new_token = index + u8::MAX as usize;
-            corpus_tokens = Self::replace_pair_to_token(corpus_tokens, pair, new_token)?;
+            corpus_tokens = Self::replace_pair_to_token(
+                corpus_tokens,
+                pair,
+                new_token,
+                self.config.num_threads,
+            )?;
             self.vocabulary.push(pair);
             self.merges.insert(pair, new_token);
             if verbose {
@@ -126,7 +132,7 @@ impl Tokenizer {
                 }
             }
 
-            if index % INTERVAL == 0 {
+            if self.config.interval.is_some_and(|x| index % x == 0) {
                 println!("Episode {index}");
                 println!("  time used: {}s", train_timer.elapsed().as_secs_f64());
                 println!("  vocabulary size: {}", u8::MAX as usize + index);
@@ -396,6 +402,8 @@ impl Tokenizer {
             train_path: None,
             verbose: false,
             save_path: None,
+            interval: None,
+            num_threads: NonZero::<usize>::MIN,
         };
         let min_special_token = data.max_vocabulary_size + (u8::MAX as usize) + 1;
         let inverse_special_tokens = config
@@ -419,13 +427,14 @@ impl Tokenizer {
     // we can't assure that the same token will be selected each time.
     fn find_most_frequent_pair(
         corpus: &HashMap<Vec<Token>, usize>,
+        num_threads: NonZero<usize>,
     ) -> Result<Option<(Pair, usize)>> {
         // To use chunk(), we need to transform HashMap to Vec
         let vec: Vec<(Vec<Token>, usize)> = corpus
             .iter()
             .map(|(tokens, value)| (tokens.clone(), *value))
             .collect();
-        let chunk_size = corpus.len().div_ceil(JOBS);
+        let chunk_size = corpus.len().div_ceil(num_threads.get());
         let chunks: Vec<_> = vec.chunks(chunk_size).collect();
 
         let handles: Vec<_> = chunks
@@ -474,11 +483,12 @@ impl Tokenizer {
         corpus: HashMap<Vec<Token>, usize>,
         from_pair: Pair,
         to_token: Token,
+        num_threads: NonZero<usize>,
     ) -> Result<HashMap<Vec<Token>, usize>> {
         let length = corpus.len();
         // To use chunk(), we need to transform HashMap to Vec
         let vec: Vec<(Vec<Token>, usize)> = corpus.into_iter().collect();
-        let chunk_size = length.div_ceil(JOBS);
+        let chunk_size = length.div_ceil(num_threads.get());
         let chunks: Vec<_> = vec.chunks(chunk_size).collect();
 
         let handles: Vec<_> = chunks
@@ -534,6 +544,8 @@ impl TokenizerConfig {
         train_path: Option<String>,
         verbose: bool,
         save_path: Option<String>,
+        interval: Option<NonZero<usize>>,
+        jobs: Option<NonZero<usize>>,
     ) -> Result<Self> {
         // merge argument and configuration
         let mut config = Self::parse_config_file(path)?;
@@ -544,8 +556,14 @@ impl TokenizerConfig {
         if save_path.is_some() {
             config.save_path = save_path;
         }
+        if interval.is_some() {
+            config.interval = interval;
+        }
+        if let Some(num_threads) = jobs {
+            config.num_threads = num_threads;
+        }
 
-        // check train_path and save_path
+        // check train_path, save_path and interval
         if config.train_path.is_none() {
             bail!(
                 "Fail to found train_path.\nPlease specify by --train-path or check your configuration file: {path}"
@@ -554,6 +572,11 @@ impl TokenizerConfig {
         if config.save_path.is_none() {
             bail!(
                 "Fail to found save_path.\nPlease specify by --save-path or check your configuration file: {path}"
+            )
+        }
+        if config.interval.is_none() {
+            bail!(
+                "Fail to found report_interval.\nPlease specify by --interval or check your configuration file: {path}"
             )
         }
 
@@ -568,6 +591,8 @@ impl TokenizerConfig {
         let mut train_path: Option<String> = None;
         let mut verbose: bool = false;
         let mut save_path: Option<String> = None;
+        let mut interval: Option<NonZero<usize>> = None;
+        let mut num_threads: NonZero<usize> = NonZero::<usize>::MIN;
 
         let file = fs::File::open(path)
             .with_context(|| format!("Fail to read from the configuration file: {}", path))?;
@@ -615,6 +640,10 @@ impl TokenizerConfig {
                 ),
                 "train_path" => train_path = Some(String::from(value)),
                 "save_path" => save_path = Some(String::from(value)),
+                "jobs" => num_threads = value.parse().with_context(|| format!("Fail to parse jobs from \"{value}\". Please check your configuration file: {path}"))?,
+                "report_interval" => interval = Some(
+                    value.parse().with_context(|| format!("Fail to parse report_interval from \"{value}\". Please check your configuration file: {path}"))?
+                ),
                 _ => continue,
             };
         }
@@ -625,7 +654,15 @@ impl TokenizerConfig {
         let special_tokens = special_tokens.unwrap_or_default();
         let pre_tokenizer_pattern = pre_tokenizer_pattern.unwrap_or(DEFAULT_PATTERN.to_string());
         if pre_tokenizer_pattern.is_empty() {
-            bail!("pre_tokenizer_pattern must not be empty.\nPlease check your configuration file: {path}")
+            bail!(
+                "pre_tokenizer_pattern must not be empty.\nPlease check your configuration file: {path}"
+            )
+        }
+        let maximum_num_threads = thread::available_parallelism().with_context(|| "Fail to get the maximum amount of parallelism available for this program using std::thread::available_parallelism.")?;
+        if num_threads.get() != 1 && num_threads > maximum_num_threads {
+            println!(
+                "jobs is {num_threads}, which is greater than the maximum amount of parallelism available for this program. Now set jobs to {maximum_num_threads}"
+            );
         }
         Ok(TokenizerConfig {
             max_vocabulary_size,
@@ -634,6 +671,8 @@ impl TokenizerConfig {
             train_path,
             verbose,
             save_path,
+            interval,
+            num_threads,
         })
     }
 }
@@ -644,10 +683,10 @@ mod tests {
 
     fn create_test_tokenizer() -> Tokenizer {
         const CONFIG_PATH: &str = "tests/test.conf";
-        let config = TokenizerConfig::new(CONFIG_PATH, None, false, None)
+        let config = TokenizerConfig::new(CONFIG_PATH, None, false, None, None, None)
             .expect("Fail to parse configuration file");
-        let mut model = Tokenizer::new(config).expect("Failed to create tokenizer");
-        model.train().expect("Failed to train tokenizer");
+        let mut model = Tokenizer::new(config).expect("Fail to create tokenizer");
+        model.train().expect("Fail to train tokenizer");
         model
     }
 
@@ -661,9 +700,9 @@ mod tests {
         const VERBOSE: bool = true;
         const SAVE_PATH: &str = "tests/test.bin";
         const CONFIG_PATH: &str = "tests/test.conf";
-        let config = TokenizerConfig::new(CONFIG_PATH, None, false, None)
+        let config = TokenizerConfig::new(CONFIG_PATH, None, false, None, None, None)
             .expect("Fail to parse configuration file");
-        let model = Tokenizer::new(config).expect("Failed to create tokenizer");
+        let model = Tokenizer::new(config).expect("Fail to create tokenizer");
         assert_eq!(model.config.pre_tokenizer_pattern, PATTERN);
         assert_eq!(model.config.max_vocabulary_size, MAX_VOCABULARY_SIZE);
         assert_eq!(model.config.special_tokens, SPECIAL_TOKENS);
@@ -676,8 +715,8 @@ mod tests {
     fn test_save_and_load() {
         let model = create_test_tokenizer();
         const MODEL_PATH: &str = "tests/test.bin";
-        model.save().expect("Failed to save model");
-        let new_model = Tokenizer::load(MODEL_PATH).expect("Failed to load model");
+        model.save().expect("Fail to save model");
+        let new_model = Tokenizer::load(MODEL_PATH).expect("Fail to load model");
         assert_eq!(
             model.config.pre_tokenizer_pattern,
             new_model.config.pre_tokenizer_pattern
@@ -699,8 +738,8 @@ mod tests {
     fn test_encode_and_decode() {
         let model = create_test_tokenizer();
         const TEXT: &str = "<|beginoftext|>+ Byte-pair encoding (BPE) is a text compression algorithm from 1994 that iteratively replaces frequent byte pairs with placeholder symbols. 这是一些混入的中文。 <|middleoftext|><|middleoftext|>Modern large language models use a modified version that converts text into \"tokens\" (natural numbers) by merging frequent character sequences, [😄😡😭 <>/?{}!@#$%^&*-=_+\\|;:`~] creating a fixed-size vocabulary. -<|endoftext|>";
-        let tokens = model.encode(TEXT).expect("Failed to encode");
-        let decoded_text = model.decode(&tokens).expect("Failed to decode");
+        let tokens = model.encode(TEXT).expect("Fail to encode");
+        let decoded_text = model.decode(&tokens).expect("Fail to decode");
         assert_eq!(TEXT, decoded_text);
     }
 }
