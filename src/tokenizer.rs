@@ -8,6 +8,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::num::NonZero;
 use std::thread;
+use std::time::Instant;
 
 // Pattern from: https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
 const DEFAULT_PATTERN: &str =
@@ -88,9 +89,10 @@ impl Tokenizer {
                 .or_insert(1);
         }
 
-        let verbose = self.config.verbose;
-        let train_timer = std::time::Instant::now();
         println!("Start training...");
+        let verbose = self.config.verbose;
+        let train_timer = Instant::now();
+        let mut interval_timer = Instant::now();
         for index in 1..=self.config.max_vocabulary_size {
             let Some((pair, times)) =
                 Self::find_most_frequent_pair(&corpus_tokens, self.config.num_threads)?
@@ -134,8 +136,9 @@ impl Tokenizer {
 
             if self.config.interval.is_some_and(|x| index % x == 0) {
                 println!("Episode {index}");
-                println!("  time used: {}s", train_timer.elapsed().as_secs_f64());
+                println!("  time used: {}s", interval_timer.elapsed().as_secs_f64());
                 println!("  vocabulary size: {}", u8::MAX as usize + index);
+                interval_timer = Instant::now();
             }
         }
         println!("End training.");
