@@ -566,7 +566,7 @@ impl TokenizerConfig {
             config.num_threads = num_threads;
         }
 
-        // check train_path, save_path and interval
+        // check train_path, save_path
         if config.train_path.is_none() {
             bail!(
                 "Fail to found train_path.\nPlease specify by --train-path or check your configuration file: {path}"
@@ -575,11 +575,6 @@ impl TokenizerConfig {
         if config.save_path.is_none() {
             bail!(
                 "Fail to found save_path.\nPlease specify by --save-path or check your configuration file: {path}"
-            )
-        }
-        if config.interval.is_none() {
-            bail!(
-                "Fail to found report_interval.\nPlease specify by --interval or check your configuration file: {path}"
             )
         }
 
