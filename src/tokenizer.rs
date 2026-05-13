@@ -320,7 +320,7 @@ impl Tokenizer {
     // encode a string that ignores any special tokens.
     fn encode_ordinary(&self, text: &str, num_threads: NonZero<usize>) -> Result<Vec<Token>> {
         if text.is_empty() {
-            return Ok(vec![])
+            return Ok(vec![]);
         }
 
         // Pre-tokenize
@@ -484,45 +484,46 @@ impl Tokenizer {
         let chunk_size = vec.len().div_ceil(num_threads.get());
         let chunks: Vec<_> = vec.chunks(chunk_size).collect();
 
-        let handles: Vec<_> = chunks
-            .into_iter()
-            .map(|chunk| {
-                let chunk = chunk.to_vec();
-                thread::spawn(move || {
-                    let mut local_freq_table = HashMap::new();
-                    for (token, count) in chunk {
-                        for w in token.windows(2) {
-                            let pair = Pair(w[0], w[1]);
-                            local_freq_table
+        thread::scope(|s| {
+            let handles: Vec<_> = chunks
+                .into_iter()
+                .map(|chunk| {
+                    s.spawn(move || {
+                        let mut local_freq_table = HashMap::new();
+                        for (token, count) in chunk {
+                            for w in token.windows(2) {
+                                let pair = Pair(w[0], w[1]);
+                                local_freq_table
+                                    .entry(pair)
+                                    .and_modify(|v: &mut usize| *v += *count)
+                                    .or_insert(*count);
+                            }
+                        }
+                        local_freq_table
+                    })
+                })
+                .collect();
+
+            let mut freq_table: HashMap<Pair, usize> = HashMap::new();
+            for (i, h) in handles.into_iter().enumerate() {
+                match h.join() {
+                    Ok(local_map) => {
+                        for (pair, count) in local_map {
+                            freq_table
                                 .entry(pair)
                                 .and_modify(|v| *v += count)
                                 .or_insert(count);
                         }
                     }
-                    local_freq_table
-                })
-            })
-            .collect();
-
-        let mut freq_table: HashMap<Pair, usize> = HashMap::new();
-        for (i, h) in handles.into_iter().enumerate() {
-            match h.join() {
-                Ok(local_map) => {
-                    for (pair, count) in local_map {
-                        freq_table
-                            .entry(pair)
-                            .and_modify(|v| *v += count)
-                            .or_insert(count);
-                    }
+                    Err(e) => bail!("Thread {i} panicked when counting pair frequency: {e:?}"),
                 }
-                Err(e) => bail!("Thread {i} panicked when counting pair frequency: {e:?}"),
             }
-        }
 
-        Ok(freq_table
-            .iter()
-            .max_by_key(|&(_, value)| value)
-            .map(|(token, times)| (*token, *times)))
+            Ok(freq_table
+                .iter()
+                .max_by_key(|&(_, value)| value)
+                .map(|(token, times)| (*token, *times)))
+        })
     }
 
     // Replace form_pair in every token in corpus to to_token
@@ -538,48 +539,52 @@ impl Tokenizer {
         let chunk_size = vec.len().div_ceil(num_threads.get());
         let chunks: Vec<_> = vec.chunks(chunk_size).collect();
 
-        let handles: Vec<_> = chunks
-            .into_iter()
-            .map(|chunk| {
-                let chunk = chunk.to_vec();
-                thread::spawn(move || {
-                    let mut local_map = HashMap::with_capacity(chunk.len());
-                    for (tokens, value) in chunk {
-                        let mut new_tokens = Vec::with_capacity(tokens.len());
-                        let mut i: usize = 0;
-                        while i < tokens.len() {
-                            if i + 1 < tokens.len() && Pair(tokens[i], tokens[i + 1]) == from_pair {
-                                new_tokens.push(to_token);
-                                i += 2;
-                            } else {
-                                new_tokens.push(tokens[i]);
-                                i += 1;
+        thread::scope(|s| {
+            let handles: Vec<_> = chunks
+                .into_iter()
+                .map(|chunk| {
+                    let chunk = chunk.to_vec();
+                    s.spawn(move || {
+                        let mut local_map = HashMap::with_capacity(chunk.len());
+                        for (tokens, value) in chunk {
+                            let mut new_tokens = Vec::with_capacity(tokens.len());
+                            let mut i: usize = 0;
+                            while i < tokens.len() {
+                                if i + 1 < tokens.len()
+                                    && Pair(tokens[i], tokens[i + 1]) == from_pair
+                                {
+                                    new_tokens.push(to_token);
+                                    i += 2;
+                                } else {
+                                    new_tokens.push(tokens[i]);
+                                    i += 1;
+                                }
                             }
+                            new_tokens.shrink_to_fit();
+                            local_map.insert(new_tokens, value);
                         }
-                        new_tokens.shrink_to_fit();
-                        local_map.insert(new_tokens, value);
-                    }
-                    local_map.shrink_to_fit();
-                    local_map
+                        local_map.shrink_to_fit();
+                        local_map
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        let mut new_corpus = HashMap::with_capacity(length);
-        for (i, h) in handles.into_iter().enumerate() {
-            match h.join() {
-                Ok(local_map) => {
-                    for (tokens, value) in local_map {
-                        new_corpus
-                            .entry(tokens)
-                            .and_modify(|v| *v += value)
-                            .or_insert(value);
+            let mut new_corpus = HashMap::with_capacity(length);
+            for (i, h) in handles.into_iter().enumerate() {
+                match h.join() {
+                    Ok(local_map) => {
+                        for (tokens, value) in local_map {
+                            new_corpus
+                                .entry(tokens)
+                                .and_modify(|v| *v += value)
+                                .or_insert(value);
+                        }
                     }
+                    Err(e) => bail!("Thread {i} panicked when replacing pairs: {e:?}"),
                 }
-                Err(e) => bail!("Thread {i} panicked when replacing pairs: {e:?}"),
             }
-        }
-        Ok(new_corpus)
+            Ok(new_corpus)
+        })
     }
 
     // encode a token sequence to smaller sequence using merging rules from merges
@@ -802,7 +807,9 @@ mod tests {
     fn test_encode_and_decode() {
         let model = create_test_tokenizer();
         const TEXT: &str = "<|beginoftext|>+ Byte-pair encoding (BPE) is a text compression algorithm from 1994 that iteratively replaces frequent byte pairs with placeholder symbols. 这是一些混入的中文。 <|middleoftext|><|middleoftext|>Modern large language models use a modified version that converts text into \"tokens\" (natural numbers) by merging frequent character sequences, [😄😡😭 <>/?{}!@#$%^&*-=_+\\|;:`~] creating a fixed-size vocabulary. -<|endoftext|>";
-        let tokens = model.encode(TEXT, NonZero::<usize>::MIN).expect("Fail to encode");
+        let tokens = model
+            .encode(TEXT, NonZero::<usize>::MIN)
+            .expect("Fail to encode");
         let decoded_text = model.decode(&tokens).expect("Fail to decode");
         assert_eq!(TEXT, decoded_text);
     }
