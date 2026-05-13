@@ -2,6 +2,7 @@ mod tokenizer;
 
 use std::num::NonZero;
 
+use anyhow::anyhow;
 use clap::{Args, Parser, Subcommand};
 use tokenizer::{Tokenizer, TokenizerConfig};
 
@@ -58,6 +59,9 @@ struct EncodeArg {
     /// Enable to show the tokens' IDs alongside the decoded text
     #[arg(long, group = "decode options")]
     show_id: bool,
+    /// the number of paraller threads
+    #[arg(short, long, default_value_t = NonZero::<usize>::MIN)]
+    jobs: NonZero<usize>,
 }
 
 #[derive(Args)]
@@ -96,8 +100,17 @@ fn train(arg: TrainArg) {
 
 fn encode(arg: EncodeArg) {
     let model = Tokenizer::load(&arg.model).unwrap_or_else(|e| eprintln_error(e));
+    let num_threads = &arg.jobs;
+    let maximum_num_threads =
+        std::thread::available_parallelism().unwrap_or_else(|e| eprintln_error(anyhow!(e)));
+    if num_threads.get() != 1 && *num_threads > maximum_num_threads {
+        println!(
+            "Warn: jobs is {num_threads}, which is greater than the maximum amount of parallelism available for this program. Now set jobs to {maximum_num_threads}"
+        );
+    }
+
     let tokens = model
-        .encode(&arg.text)
+        .encode(&arg.text, *num_threads)
         .unwrap_or_else(|e| eprintln_error(e));
     if arg.no_decode {
         println!("{:?}", tokens);

@@ -61,7 +61,11 @@ impl fmt::Display for TokenizerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Tokenizer Configuration:")?;
         writeln!(f, "    max_vocabulary_size: {}", self.max_vocabulary_size)?;
-        writeln!(f, "    pre_tokenizer_pattern: {:#?}", self.pre_tokenizer_pattern)?;
+        writeln!(
+            f,
+            "    pre_tokenizer_pattern: {:#?}",
+            self.pre_tokenizer_pattern
+        )?;
         writeln!(f, "    special_tokens: [")?;
         for special_token in &self.special_tokens {
             writeln!(f, "        {:#?},", special_token)?;
@@ -177,7 +181,7 @@ impl Tokenizer {
     }
 
     // encode a given string text to a token sequence
-    pub fn encode(&self, text: &str) -> Result<Vec<Token>> {
+    pub fn encode(&self, text: &str, num_threads: NonZero<usize>) -> Result<Vec<Token>> {
         if !self.inverse_special_tokens.is_empty() {
             // special tokens match
             let special_pattern = self
@@ -197,7 +201,10 @@ impl Tokenizer {
                 let end = mat.end();
 
                 if last_end <= start {
-                    result.append(&mut self.encode_ordinary(&text[last_end..start])?);
+                    let before = &text[last_end..start];
+                    if !before.is_empty() {
+                        result.append(&mut self.encode_ordinary(before, num_threads)?);
+                    }
                     if let Some(&id) = self.inverse_special_tokens.get(mat.as_str()) {
                         result.push(id as Token);
                     }
@@ -205,12 +212,12 @@ impl Tokenizer {
                 }
             }
             if last_end < text.len() {
-                result.append(&mut self.encode_ordinary(&text[last_end..])?);
+                result.append(&mut self.encode_ordinary(&text[last_end..], num_threads)?);
             }
 
             Ok(result)
         } else {
-            self.encode_ordinary(text)
+            self.encode_ordinary(text, num_threads)
         }
     }
 
@@ -311,46 +318,54 @@ impl fmt::Display for Tokenizer {
 // Private Method
 impl Tokenizer {
     // encode a string that ignores any special tokens.
-    fn encode_ordinary(&self, text: &str) -> Result<Vec<Token>> {
+    fn encode_ordinary(&self, text: &str, num_threads: NonZero<usize>) -> Result<Vec<Token>> {
+        if text.is_empty() {
+            return Ok(vec![])
+        }
+
         // Pre-tokenize
         let pattern = &self.config.pre_tokenizer_pattern;
         debug_assert!(!pattern.is_empty(), "pre-tokenize pattern is empty!");
         let regex = Regex::new(pattern)?;
-        let chunks: Vec<&str> = regex
+        let corpus: Vec<&str> = regex
             .find_iter(text)
             .filter_map(|m| m.ok())
             .map(|m| m.as_str())
             .collect();
-
-        Ok(chunks
+        let corpus_tokens: Vec<Vec<Token>> = corpus
             .iter()
-            .flat_map(|&chunk| self.encode_chunk(chunk))
-            .collect())
-    }
+            .map(|corpu| corpu.bytes().map(|b| b as Token).collect())
+            .collect();
 
-    // encode a string chunk to a token sequence
-    fn encode_chunk(&self, chunk: &str) -> Vec<Token> {
-        let mut tokens: Vec<Token> = chunk.bytes().map(|c| c as Token).collect();
-
-        if tokens.len() < 2 {
-            return tokens;
-        }
-
-        let mut i: usize = 0;
-        while i < tokens.len().saturating_sub(1) {
-            let pair = Pair(tokens[i], tokens[i + 1]);
-            if let Some(&new_token) = self.merges.get(&pair) {
-                tokens[i] = new_token;
-                tokens.remove(i + 1);
-                if i > 0 {
-                    i = i.saturating_sub(1);
-                }
-            } else {
-                i += 1;
+        let chunk_size = corpus_tokens.len().div_ceil(num_threads.get());
+        let chunks: Vec<_> = corpus_tokens.chunks(chunk_size).collect();
+        let merges = &self.merges;
+        let mut result = vec![];
+        thread::scope(|s| {
+            let handles: Vec<_> = chunks
+                .into_iter()
+                .map(|chunk| {
+                    let chunk = chunk.to_vec();
+                    s.spawn(|| {
+                        let local_result: Vec<Token> = chunk
+                            .into_iter()
+                            .flat_map(|tokens| Self::encode_chunk(tokens, merges))
+                            .collect();
+                        local_result
+                    })
+                })
+                .collect();
+            for (i, h) in handles.into_iter().enumerate() {
+                result.push(match h.join() {
+                    Ok(local_result) => Ok(local_result),
+                    Err(e) => Err(anyhow!("Thread {i} panicked when encoding: {e:?}")),
+                })
             }
-        }
-
-        tokens
+        });
+        result.into_iter().try_fold(Vec::new(), |mut acc, item| {
+            acc.extend(item?);
+            Ok(acc)
+        })
     }
 
     // decode a tokens sequence that ignores any special tokens.
@@ -466,7 +481,7 @@ impl Tokenizer {
             .iter()
             .map(|(tokens, value)| (tokens.clone(), *value))
             .collect();
-        let chunk_size = corpus.len().div_ceil(num_threads.get());
+        let chunk_size = vec.len().div_ceil(num_threads.get());
         let chunks: Vec<_> = vec.chunks(chunk_size).collect();
 
         let handles: Vec<_> = chunks
@@ -520,7 +535,7 @@ impl Tokenizer {
         let length = corpus.len();
         // To use chunk(), we need to transform HashMap to Vec
         let vec: Vec<(Vec<Token>, usize)> = corpus.into_iter().collect();
-        let chunk_size = length.div_ceil(num_threads.get());
+        let chunk_size = vec.len().div_ceil(num_threads.get());
         let chunks: Vec<_> = vec.chunks(chunk_size).collect();
 
         let handles: Vec<_> = chunks
@@ -561,10 +576,32 @@ impl Tokenizer {
                             .or_insert(value);
                     }
                 }
-                Err(e) => bail!("Thread {i} panicked when counting pair frequency: {e:?}"),
+                Err(e) => bail!("Thread {i} panicked when replacing pairs: {e:?}"),
             }
         }
         Ok(new_corpus)
+    }
+
+    // encode a token sequence to smaller sequence using merging rules from merges
+    fn encode_chunk(mut tokens: Vec<Token>, merges: &HashMap<Pair, Token>) -> Vec<Token> {
+        if tokens.len() < 2 {
+            return tokens;
+        }
+
+        let mut i: usize = 0;
+        while i < tokens.len().saturating_sub(1) {
+            let pair = Pair(tokens[i], tokens[i + 1]);
+            if let Some(&new_token) = merges.get(&pair) {
+                tokens[i] = new_token;
+                tokens.remove(i + 1);
+                if i > 0 {
+                    i = i.saturating_sub(1);
+                }
+            } else {
+                i += 1;
+            }
+        }
+        tokens
     }
 }
 
@@ -688,7 +725,7 @@ impl TokenizerConfig {
         let maximum_num_threads = thread::available_parallelism().with_context(|| "Fail to get the maximum amount of parallelism available for this program using std::thread::available_parallelism.")?;
         if num_threads.get() != 1 && num_threads > maximum_num_threads {
             println!(
-                "jobs is {num_threads}, which is greater than the maximum amount of parallelism available for this program. Now set jobs to {maximum_num_threads}"
+                "Warn: jobs is {num_threads}, which is greater than the maximum amount of parallelism available for this program. Now set jobs to {maximum_num_threads}"
             );
         }
         Ok(TokenizerConfig {
@@ -765,7 +802,7 @@ mod tests {
     fn test_encode_and_decode() {
         let model = create_test_tokenizer();
         const TEXT: &str = "<|beginoftext|>+ Byte-pair encoding (BPE) is a text compression algorithm from 1994 that iteratively replaces frequent byte pairs with placeholder symbols. 这是一些混入的中文。 <|middleoftext|><|middleoftext|>Modern large language models use a modified version that converts text into \"tokens\" (natural numbers) by merging frequent character sequences, [😄😡😭 <>/?{}!@#$%^&*-=_+\\|;:`~] creating a fixed-size vocabulary. -<|endoftext|>";
-        let tokens = model.encode(TEXT).expect("Fail to encode");
+        let tokens = model.encode(TEXT, NonZero::<usize>::MIN).expect("Fail to encode");
         let decoded_text = model.decode(&tokens).expect("Fail to decode");
         assert_eq!(TEXT, decoded_text);
     }
