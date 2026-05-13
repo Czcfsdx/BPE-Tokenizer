@@ -57,9 +57,38 @@ pub struct TokenizerConfig {
     pub interval: Option<NonZero<usize>>,
 }
 
+impl fmt::Display for TokenizerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Tokenizer Configuration:")?;
+        writeln!(f, "    max_vocabulary_size: {}", self.max_vocabulary_size)?;
+        writeln!(f, "    pre_tokenizer_pattern: {:#?}", self.pre_tokenizer_pattern)?;
+        writeln!(f, "    special_tokens: [")?;
+        for special_token in &self.special_tokens {
+            writeln!(f, "        {:#?},", special_token)?;
+        }
+        writeln!(f, "    ]")?;
+        match &self.train_path {
+            Some(path) => writeln!(f, "    train_path: {:#?}", path)?,
+            None => writeln!(f, "    train_path: None")?,
+        }
+        match &self.save_path {
+            Some(path) => writeln!(f, "    save_path: {:#?}", path)?,
+            None => writeln!(f, "    save_path: None")?,
+        }
+        match &self.interval {
+            Some(i) => writeln!(f, "    report_interval: {}", i)?,
+            None => writeln!(f, "    report_interval: None")?,
+        }
+        writeln!(f, "    verbose: {}", self.verbose)?;
+        write!(f, "    jobs: {}", self.num_threads)?;
+        Ok(())
+    }
+}
+
 // Public Method
 impl Tokenizer {
     pub fn train(&mut self) -> Result<()> {
+        println!("{}\n", self.config);
         // Pre-tokenize
         let pattern = &self.config.pre_tokenizer_pattern;
         debug_assert!(!pattern.is_empty(), "pre-tokenize pattern is empty!");
