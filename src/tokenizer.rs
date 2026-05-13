@@ -62,9 +62,7 @@ impl Tokenizer {
     pub fn train(&mut self) -> Result<()> {
         // Pre-tokenize
         let pattern = &self.config.pre_tokenizer_pattern;
-        if pattern.is_empty() {
-            bail!("Fail to found pre_tokenizer_pattern in training!")
-        }
+        debug_assert!(!pattern.is_empty(), "pre-tokenize pattern is empty!");
         let regex = Regex::new(pattern)?;
 
         let Some(path) = self.config.train_path.as_deref() else {
@@ -278,9 +276,7 @@ impl Tokenizer {
     fn encode_ordinary(&self, text: &str) -> Result<Vec<Token>> {
         // Pre-tokenize
         let pattern = &self.config.pre_tokenizer_pattern;
-        if pattern.is_empty() {
-            bail!("Fail to found pre_tokenizer_pattern in training!")
-        }
+        debug_assert!(!pattern.is_empty(), "pre-tokenize pattern is empty!");
         let regex = Regex::new(pattern)?;
         let chunks: Vec<&str> = regex
             .find_iter(text)
@@ -628,6 +624,9 @@ impl TokenizerConfig {
         ))?;
         let special_tokens = special_tokens.unwrap_or_default();
         let pre_tokenizer_pattern = pre_tokenizer_pattern.unwrap_or(DEFAULT_PATTERN.to_string());
+        if pre_tokenizer_pattern.is_empty() {
+            bail!("pre_tokenizer_pattern must not be empty.\nPlease check your configuration file: {path}")
+        }
         Ok(TokenizerConfig {
             max_vocabulary_size,
             pre_tokenizer_pattern,
